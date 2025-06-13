@@ -19,12 +19,12 @@ save_dir = "/storage1/sibai/Active/ihab/research_new/dino_wm/scratch_ihab_files/
 os.makedirs(save_dir, exist_ok=True)
 
 # 3. Load the global episode-wise tensors
-actions     = torch.load("/storage1/sibai/Active/ihab/research_new/datasets_dino/point_maze/actions.pth")
-states      = torch.load("/storage1/sibai/Active/ihab/research_new/datasets_dino/point_maze/states.pth")
-seq_lengths = torch.load("/storage1/sibai/Active/ihab/research_new/datasets_dino/point_maze/seq_lengths.pth")
+actions     = torch.load("/storage1/sibai/Active/ihab/research_new/datasets_dino/dubins/actions.pth")
+states      = torch.load("/storage1/sibai/Active/ihab/research_new/datasets_dino/dubins/states.pth")
+seq_lengths = torch.load("/storage1/sibai/Active/ihab/research_new/datasets_dino/dubins/seq_lengths.pth")
 
 # 4. Load and sort observation files
-obs_dir = Path("/storage1/sibai/Active/ihab/research_new/datasets_dino/point_maze/obses")
+obs_dir = Path("/storage1/sibai/Active/ihab/research_new/datasets_dino/dubins/obses")
 def episode_index(fn):
     return int(re.search(r"\d+", fn.name).group())
 obs_paths = sorted(obs_dir.glob("episode_*.pth*"), key=episode_index)
@@ -74,3 +74,43 @@ plt.axis("off")
 plt.savefig(image_path, bbox_inches="tight")
 plt.close()
 print(f"Image saved to {image_path}")
+
+
+import torch
+from pathlib import Path
+import re
+from torch.utils.data import Dataset
+# 1. Load the global episode-wise tensors (shape: [num_episodes, episode_len, dim])
+actions     = torch.load("/storage1/sibai/Active/ihab/research_new/datasets_dino/dubins/actions.pth")
+states      = torch.load("/storage1/sibai/Active/ihab/research_new/datasets_dino/dubins/states.pth")
+seq_lengths = torch.load("/storage1/sibai/Active/ihab/research_new/datasets_dino/dubins/seq_lengths.pth")  # e.g., tensor([100, 100, ...])
+# 2. Gather & sort the observation files
+obs_dir = Path("/storage1/sibai/Active/ihab/research_new/datasets_dino/dubins/obses")
+def episode_index(fn):
+    return int(re.search(r"\d+", fn.name).group())
+obs_paths = sorted(obs_dir.glob("episode_*.pth*"), key=episode_index)
+assert len(obs_paths) == len(seq_lengths) == len(states), "Mismatch in number of episodes"
+# 3. Define the EpisodeDataset class
+class EpisodeDataset(Dataset):
+    def __init__(self, states, actions, obs_paths):
+        self.states = states        # shape: [N, T, state_dim]
+        self.actions = actions      # shape: [N, T, action_dim]
+        self.obs_paths = obs_paths  # list of Path objects
+    def __len__(self):
+        return len(self.obs_paths)
+    def __getitem__(self, idx):
+        ep_states = self.states[idx]      # shape: [T, state_dim]
+        ep_actions = self.actions[idx]    # shape: [T, action_dim]
+        ep_obs = torch.load(self.obs_paths[idx])  # shape: [T, H, W, C] or similar
+        return {
+            "states": ep_states,
+            "actions": ep_actions,
+            "obs": ep_obs
+        }
+# 4. Instantiate the dataset and test
+dataset = EpisodeDataset(states, actions, obs_paths)
+print(f"{len(dataset)} episodes, first episode has:")
+sample = dataset[0]
+print(" • states:",  sample["states"].shape)
+print(" • actions:", sample["actions"].shape)
+print(" • obs:",     type(sample["obs"]), getattr(sample["obs"], "shape", None))

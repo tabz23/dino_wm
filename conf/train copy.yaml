@@ -1,16 +1,17 @@
 defaults:
   - _self_
-  - env: point_maze
-  - encoder: dino 
+  - env: dubins
+  # - encoder: dino   #r3m 
+  - encoder: dino_cls #r3m  
   - action_encoder: proprio
   - proprio_encoder: proprio
-  - decoder: vqvae
+  # - decoder: vqvae #transposed_conv
+  - decoder: transposed_conv
   - predictor: vit
   - override hydra/launcher: submitit_slurm
 
 # base path to save model outputs. Checkpoints will be saved to ${ckpt_base_path}/outputs.
 ckpt_base_path: ./ # put absolute path here
-
 hydra:
   run:
     dir: ${ckpt_base_path}/outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}
@@ -34,7 +35,7 @@ training:
   epochs: 100
   batch_size: 32 # should >= nodes * tasks_per_node
   save_every_x_epoch: 1
-  reconstruct_every_x_batch: 500
+  reconstruct_every_x_batch: 100
   num_reconstruct_samples: 6
   encoder_lr: 1e-6
   decoder_lr: 3e-4
@@ -45,7 +46,7 @@ img_size: 224 # should be a multiple of 224
 frameskip: 5
 concat_dim: 1
 
-normalize_action: True
+normalize_action: False
 
 # action encoder
 action_emb_dim: 10

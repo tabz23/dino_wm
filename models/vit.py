@@ -106,7 +106,14 @@ class ViTPredictor(nn.Module):
         global NUM_FRAMES, NUM_PATCHES
         NUM_FRAMES = num_frames
         NUM_PATCHES = num_patches
+        '''
+        B = batch size,
 
+        num_frames = how many time-steps (frames) are in this “window” of history,
+        num_patches = how many patches each frame was split into,
+        therefore N=num_frames * num_patches is total number of tokens in the sequence,
+        and D = embedding dimension per token.
+        '''
         self.pos_embedding = nn.Parameter(torch.randn(1, num_frames * (num_patches), dim)) # dim for the pos encodings
         self.dropout = nn.Dropout(emb_dropout)
         self.transformer = Transformer(dim, depth, heads, dim_head, mlp_dim, dropout)

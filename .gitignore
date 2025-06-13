@@ -2,3 +2,30 @@ __pycache__
 *.pyc
 outputs
 plan_outputs
+
+##i added this
+__pycache__/
+*.pyo
+runs/
+# Ignore virtual environments
+.env/
+venv/
+.dino_wm/
+*.png
+*.logs
+*.txt
+*.mp4
+*.pth
+# Ignore model checkpoints, logs, and datasets
+*.ckpt
+wandb/
+logs/
+checkpoints/
+*.zip
+*.tar.gz
+*.h5
+*.pt
+# Ignore large temp files or intermediate outputs
+*.npy
+*.npz
+*.pkl

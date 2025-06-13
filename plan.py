@@ -1,3 +1,7 @@
+# i ADDED THIS to solve Cannot re-initialize CUDA in forked subprocess. To use CUDA with multiprocessing, you must use the 'spawn' start method
+import multiprocessing as mp
+mp.set_start_method("spawn", force=True)
+
 import os
 import gym
 import json
@@ -203,18 +207,19 @@ class PlanWorkspace:
         observations = []
         
         if self.goal_source == "random_state":
+            ##i commented below because useless
             # update env config from val trajs
-            observations, states, actions, env_info = (
-                self.sample_traj_segment_from_dset(traj_len=2)
-            )
-            self.env.update_env(env_info)
+            # observations, states, actions, env_info = (
+            #     self.sample_traj_segment_from_dset(traj_len=2)
+            # )
+            # self.env.update_env(env_info)
 
             # sample random states
             rand_init_state, rand_goal_state = self.env.sample_random_init_goal_states(
                 self.eval_seed
             )
-            if self.env_name == "deformable_env": # take rand init state from dset for deformable envs
-                rand_init_state = np.array([x[0] for x in states])
+            # if self.env_name == "deformable_env": # take rand init state from dset for deformable envs
+            #     rand_init_state = np.array([x[0] for x in states])
 
             obs_0, state_0 = self.env.prepare(self.eval_seed, rand_init_state)
             obs_g, state_g = self.env.prepare(self.eval_seed, rand_goal_state)
@@ -332,6 +337,12 @@ class PlanWorkspace:
             obs_g=self.obs_g,
             actions=actions_init,
         )
+        
+        with open("planned_actions.pkl", "wb") as f:##i added this
+            pickle.dump(actions.cpu().numpy(), f)##i added this
+        print("Actions taken:", actions.cpu().numpy())##i added this
+        print("Actions takenshape :", actions.cpu().numpy().shape)##i added this
+            
         logs, successes, _, _ = self.evaluator.eval_actions(
             actions.detach(), action_len, save_video=True, filename="output_final"
         )

@@ -26,11 +26,18 @@ class PushTWrapper(PushTEnv):
             if self.with_velocity:
                 return np.array(
                     [
-                        rs.randint(50, 450),
-                        rs.randint(50, 450),
-                        rs.randint(100, 400),
-                        rs.randint(100, 400),
-                        rs.randn() * 2 * np.pi - np.pi,
+                        # rs.randint(50, 450),
+                        # rs.randint(50, 450),
+                        # rs.randint(100, 400),
+                        # rs.randint(100, 400),
+                        # rs.randn() * 2 * np.pi - np.pi,
+                        # 0,
+                        # 0,  # agent velocities default 0
+                        rs.randint(449, 450),
+                        rs.randint(449, 450),
+                        rs.randint(399, 400),
+                        rs.randint(399, 400),
+                        0,
                         0,
                         0,  # agent velocities default 0
                     ]

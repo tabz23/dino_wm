@@ -26,12 +26,12 @@
   model_name: null
   model_epoch: latest
 
-  seed: 99
-  n_evals: 1
-  goal_source: 'file'
-  goal_file_path: '/storage1/sibai/Active/ihab/research_new/dino_wm/scratch_ihab_files/plan_targets.pkl'
+  seed: 100
+  n_evals: 10
+  goal_source: 'random_state'
+  # goal_file_path: '/storage1/sibai/Active/ihab/research_new/dino_wm/scratch_ihab_files/plan_targets.pkl'
   goal_H: 5 
-  n_plot_samples: 100
+  n_plot_samples: 10
 
   debug_dset_init: False
 
@@ -49,7 +49,7 @@
       target: planning.cem.CEMPlanner
       horizon: 5
       topk: 5
-      num_samples: 300
+      num_samples: 400
       var_scale: 1
       opt_steps: 30
       eval_every: 1

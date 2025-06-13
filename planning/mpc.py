@@ -100,6 +100,11 @@ class MPCPlanner(BasePlanner):
                 obs_0=init_obs_0,
                 state_0=init_state_0,
             )
+            
+            ''' i added this
+            Before you run eval_actions(action_so_far, …), you must guarantee that the evaluator’s internal environment is reset to the very original initial condition. That way:
+            The entire chain in action_so_far is played sequentially beginning from exactly the same start that the original obs_0 described.
+            '''
             logs, successes, e_obses, e_states = self.evaluator.eval_actions(
                 action_so_far,
                 self.action_len,
@@ -124,12 +129,27 @@ class MPCPlanner(BasePlanner):
             e_final_obs = slice_trajdict_with_t(e_obses, start_idx=-1)
             cur_obs_0 = e_final_obs
             e_final_state = e_states[:, -1]
+            '''
+            from now on, start your next sub‐plan from this new e_final_state (and corresponding image e_final_obs).” 
+            That’s how you get closed‐loop feedback: you re‐plan from the environment’s new actual state,
+            rather than from some stale “predicted” state.
+    
+            note that if you look at output files you would see planX_n_failure/success.mp4 and each of these mp4 executes a sequence
+            of actions starting from initial state up until the end. so each time X increases (1 mpc iteration extra) we get a longer video
+            
+            
+            therefore:
+            first assign_init_cond resets the evaluator to the very first initial condition so that eval_actions(action_so_far,…) is a rollout of the whole chain from t=0
+            Second assign_init_cond sets the evaluator to the new current state t=k+1 * n_takenactions so that next iteration’s sub‐planner sees the correct “live” initial state for its optimization.
+            ''' 
             self.evaluator.assign_init_cond(
                 obs_0=e_final_obs,
                 state_0=e_final_state,
             )
             self.iter += 1
             self.sub_planner.logging_prefix = f"plan_{self.iter}"
+
+
 
         planned_actions = torch.cat(self.planned_actions, dim=1)
         self.evaluator.assign_init_cond(

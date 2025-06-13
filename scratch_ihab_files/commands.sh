@@ -10,8 +10,16 @@ conda activate dino_wm
 cd /storage1/sibai/Active/ihab/research_new/dino_wm
 export DATASET_DIR=/storage1/sibai/Active/ihab/research_new/datasets_dino
 export TORCH_HOME=/storage1/sibai/Active/ihab/tmp/torch
+# export HOME=/storage1/sibai/Active/ihab/tmp/
 
 
-# python train.py --config-name train.yaml env=point_maze frameskip=5 num_hist=3
+# python train.py --config-name "train copy.yaml" env=point_maze frameskip=5 num_hist=3
+# accelerate launch train.py --config-name "train copy.yaml" env=pusht frameskip=5 num_hist=3
 
-# python plan.py --config-name "plan_pusht copy.yaml" model_name=pusht
+# accelerate launch train.py --config-name "train copy.yaml" env=dubins frameskip=5 num_hist=3
+# python train.py --config-name "train copy.yaml" env=dubins frameskip=5 num_hist=3
+# python train.py --config-name "train copy.yaml" env=maniskill frameskip=5 num_hist=3
+
+# accelerate launch plan.py --config-name "plan_pusht copy.yaml" model_name=pusht
+# accelerate launch plan.py --config-name "plan_dubins.yaml" model_name=dubins
+

@@ -22,7 +22,7 @@ hydra:
             "export MASTER_PORT=$(for port in $(shuf -i 30000-65500 -n 20); do if [[ $(netstat -tupln 2>&1 | grep $port | wc -l) -eq 0 ]] ; then echo $port; break; fi; done;)",]
 
 # model to load for planning
-ckpt_base_path: /storage1/sibai/Active/ihab/research_new/checkpt_dino  # put absolute path here. Checkpoints will be loaded from ${ckpt_base_path}/outputs
+ckpt_base_path: ./checkpoints  # put absolute path here. Checkpoints will be loaded from ${ckpt_base_path}/outputs
 model_name: null
 model_epoch: latest
 
@@ -46,11 +46,402 @@ planner:
   n_taken_actions: 5
   sub_planner:
     target: planning.cem.CEMPlanner
-    horizon: 5
+    horizon: 5 #horizon=5 means “optimize over 5 successive action‐chunks.” Each chunk itself represents frameskip low‐level timesteps. (i.e. 25 raw steps if default frameskip=5).
+  
+#opt_steps=30 means “run the CEM update loop for 30 iterations.” Every iteration:
+  # You sample a population of candidate action‐sequences (size = num_samples = 300 by default).
+  # You evaluate them with the world model + objective.
+  # You keep the top topk (=30) elites and refit a Gaussian over those elites.
+  # You repeat for opt_steps times.
+  # Hence, by setting planner.opt_steps=30, you are telling CEM to refine its distribution 30 times before returning a final 5‐chunk plan.
     topk: 30
-    num_samples: 300
+    num_samples: 300 
     var_scale: 1
     opt_steps: 30
     eval_every: 1
+
+    
   name: mpc_cem
 
+
+
+
+# n_evals=50 → 50 different start/goal pairs from the dataset.
+
+# goal_source='dset' → those 50 pairs come from valid trajectories in the dataset.
+
+# goal_H=5 → each candidate plan is 5 chunks long (i.e. 25 raw steps if default frameskip=5).
+
+# planner = MPCPlanner → at each MPC iteration, call CEM to find those 5 chunks, then execute all 5 chunks, then repeat until success.
+
+# sub_planner = CEMPlanner(horizon=5, num_samples=300, topk=30, opt_steps=10, eval_every=1) → CEM runs for 10 rounds to optimize a 5‐chunk plan.
+
+# seed=99 → base random seed.
+
+# n_plot_samples=10 → during evaluation, save 10 rollouts as video.
+
+# n_evals=50 → the very first line of the job prints
+
+# vbnet
+# Copy
+# Edit
+# eval_seed:  [ 99*0+1, 99*1+1, …, 99*49+1 ]   # i.e. a list of 50 distinct RNG seeds
+# so you produce 50 distinct planning problems in parallel.
+
+
+
+# | Variable              | Defined in                 | Meaning                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+# | --------------------- | -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+# | **`frameskip`**       | `train.yaml` (world model) | - How many raw simulator steps one “action” encompasses.  <br>- E.g. if `frameskip=5`, then giving the model action `u` means “do `step(u)` five times in a row before the next time step.”                                                                                                                                                                                                                                                                                          |
+# | **`goal_H`**          | `plan.yaml`                | - How many of those *chunks* you plan over.  <br>- Each chunk = `frameskip` raw steps.  <br>- So if `frameskip=5` and `goal_H=5`, your planner is looking 25 raw steps into the future.                                                                                                                                                                                                                                                                                              |
+# | **`n_taken_actions`** | `plan.yaml` (MPC only)     | - Only relevant when you’re using the **`MPCPlanner`** (i.e. receding‐horizon).  <br>- After CEM returns a full `goal_H`‐chunk plan, MPC will execute only the first `n_taken_actions` chunks in the real simulator, then replan from the new state.  <br>- If `n_taken_actions=goal_H`, you execute the entire horizon at once.  <br>- If `n_taken_actions<goal_H`, you do partial execution (e.g. 2 out of 5 chunks), then re‐call CEM for another 5 chunks from wherever you end. |
+
+
+
+
+# Difference between opt_steps and max_iteropt_steps
+
+# Belongs to CEMPlanner (the inner optimizer).
+
+# It controls how many rounds of “sample–evaluate–re‐fit” CEM performs when searching for a single H‐chunk plan. For example, if opt_steps=5:
+
+# CEM samples num_samples=200 candidate sequences from the current Gaussian.
+
+# Scores them via the learned world model.
+
+# Keeps topk=5 elites, re‐computes the mean/variance of those elites, optionally scales variance by var_scale=1.
+
+# Repeat for a total of 5 times.
+
+# Finally, return the best‐found action sequence.
+
+# In other words, opt_steps is “how many times to iterate the CEM update” when trying to find one H‐chunk plan.
+
+# max_iter
+
+# Belongs to MPCPlanner (the outer loop).
+
+# It controls how many times MPC will call CEM + execute M chunks before giving up.
+
+# If max_iter=3, MPC will do at most 3 separate calls to CEM (each with its own opt_steps rounds), executing M chunks each time. After the third iteration, it returns whatever it has and stops—even if some seeds remain failing.
+
+# If max_iter=null (∞), MPC will loop ad infinitum until all seeds have success=True.
+
+
+
+
+# At planning time (inside CEM), you ask for a sequence of H chunks. Each chunk has shape (frameskip × action_dim). In your case, frameskip = 5 and action_dim = 2, so each chunk is a 10-dimensional vector that really means “the raw‐env action at step t, step t+1, …, step t+4.” Those 5 raw actions can be different from one another (they came from the dataset or from CEM’s search), they are not forced to be identical.
+
+
+
+##the output videos
+# ┌───────────────────┬───────────────────┐
+# │    Real Env Obs   │     Goal Image    │
+# │   (actual sim)    │  (constant)       │
+# ├───────────────────┼───────────────────┤
+# │  Imagined Obs     │     Goal Image    │
+# │    (from our WM)  │  (constant)       │
+# └───────────────────┴───────────────────┘
+
+# #the output frames planX.png
+#        C0      C1      C2      C3      C4      C5      C6
+#     ┌─────┬─────┬─────┬─────┬─────┬─────┬───────┐
+# R0  │ A00 │ A01 │ A02 │ A03 │ A04 │ A05 │  G0   │  ← Seed 0 real
+#     ├─────┼─────┼─────┼─────┼─────┼─────┼───────┤
+# R1  │ B00 │ B01 │ B02 │ B03 │ B04 │ B05 │  G0   │  ← Seed 0 imagined
+#     ├─────┼─────┼─────┼─────┼─────┼─────┼───────┤
+# R2  │ A10 │ A11 │ A12 │ A13 │ A14 │ A15 │  G1   │  ← Seed 1 real
+#     ├─────┼─────┼─────┼─────┼─────┼─────┼───────┤
+# R3  │ B10 │ B11 │ B12 │ B13 │ B14 │ B15 │  G1   │  ← Seed 1 imagined
+# ...
+
+
+
+
+# Run CEM for opt_steps rounds
+# • After those opt_steps rounds, CEM hands back one single “best” 
+# T-chunk sequence of actions (in our config, T=goal_H=5 chunks).
+
+# Execute the first k=n_taken_actions chunks in the real simulator
+# • Because we set n_taken_actions = 5 (and goal_H = 5), we execute all 5 chunks of that sequence (i.e. 25 raw steps) in the real PushTEnv.
+# • As we step through those 25 raw‐step controls, the environment produces frames that get saved into plan0_0_failure.mp4 (for seed 0), plan0_1_success.mp4 (for seed 1), etc., and a static collage plan0.png is made of the subsampled frames + goals.
+
+# Check success, update the state, then loop
+# • Once those 5 chunks are done, we check “did seed i hit its goal in the real env?” If any seed still failed, that seed’s final observation (and its latent encoding) become the new “current state” for iteration 1.
+# • Now iteration 1 begins: we call CEM again (from the new latent state) for another opt_steps rounds, get a new best 5-chunk plan, execute it, and produce plan1.png and plan1_{i}_{success/failure}.mp4, and so on.
+
+
+
+#during training to create the causal model and depend on proprio and actions
+# concat_dim=1: #this is 1 in the train.yaml. shows how we concatinate proprio and actions to the latent:
+
+# Proprio and action are tiled and repeated so every patch gets access to those features.
+# Latent: (B, T, num_patches, emb_dim + action_dim + proprio_dim)
+
+# The LOSS FUNCTION is typically a weighted sum of: check (visual_world_model.py line 216)
+# MSE between predicted and ground-truth latents
+# MSE between reconstructed and ground-truth images
+# VQ-VAE or the conv decoding loss
+# MSE on proprio 
+
+
+
+
+# Here’s what happens, step by step, when a batch is run:
+# obs: Dict with keys visual, proprio.
+# visual: shape (B, T, 3, H, W)
+# proprio: shape (B, T, P)
+# act: Actions, shape (B, T, A)
+
+# VWorldModel.encode_obs():
+# Visual through encoder (self.encoder), gets (B, T, n_patches, emb_dim)
+# Proprio through encoder, gets (B, T, emb_dim)
+
+# VWorldModel.encode_act():
+# Actions through action encoder, gets (B, T, emb_dim)
+
+# VWorldModel.encode():
+# All above are concatenated/combined, final shape (B, T, n_patches+2, emb_dim) (or variant)
+
+# VWorldModel.predict():
+# Passes windowed sequences to the predictor (Transformer), output shape matches input.
+
+# VWorldModel.decode():
+# Separates latents, decodes visuals through VQ-VAE or TransposedConv.
+
+# Losses computed between predictions and targets.
+
+# (images)      (proprio)     (actions)
+#    │             │              │
+# [Visual Enc] [ProprioEnc]  [ActionEnc]
+#    │             │              │
+#    └───── concat/tiling ────────┘
+#                 │
+#           [Predictor/Transformer] (causal, attention-masked)
+#                 │
+#           [Predicted Latent Future]
+#                 │
+#          [Decoder (VQ-VAE or TransposedConv)]
+#                 │
+#            [Predicted Images]
+
+
+
+# Does the Predicted Latent Include Actions/Proprio?
+# Yes: The predicted latent from the model always includes action and proprio tokens (or their embeddings).
+
+# But: When decoding to image, only the visual tokens are used.
+
+# The decoder does not use action/proprio tokens.
+
+# Decoding: How Image is Retrieved from Latent
+# How Is Decoding Done?
+# After prediction, you separate the visual, proprio, and action parts (see separate_emb).
+
+# The visual part (either patch tokens or CLS token) is passed into the decoder to reconstruct the image.
+
+# The proprio part is usually not decoded to the original state (unless you have a special decoder for it).
+
+# In code:
+
+# decode(z) → separates into visual tokens and others.
+
+# decoder(z_obs["visual"]) → reconstructs the image from the predicted visual tokens.
+
+
+
+# How the code returns either CLS or patch tokens
+# The DINO encoder wraps a ViT (Vision Transformer) model.
+# Let’s look at this block in DinoV2Encoder.forward():
+
+
+# def forward(self, x):
+#     emb = self.base_model.forward_features(x)[self.feature_key]
+#     if self.latent_ndim == 1:
+#         emb = emb.unsqueeze(1) # dummy patch dim
+#     return emb
+# self.base_model.forward_features(x) returns a dictionary of embeddings:
+
+# "x_norm_patchtokens": all patch embeddings. Shape: (batch, num_patches, emb_dim)
+# "x_norm_clstoken": CLS token embedding. Shape: (batch, emb_dim)
+# If you choose "x_norm_patchtokens", the output is (batch, num_patches, emb_dim).
+# If you choose "x_norm_clstoken", the output is (batch, emb_dim), but the code unsqueezes dim 1 so shape becomes (batch, 1, emb_dim)—this makes the output shape compatible for downstream code expecting a sequence of tokens.
+
+
+
+
+
+# What is the CLS token?
+# CLS token = Class token.
+
+# In a Vision Transformer:
+# Before passing the sequence of patch embeddings to the Transformer, a learnable vector (the CLS token) is prepended to the sequence.
+# After several attention layers, the output at the position of the CLS token is treated as a summary representation of the entire image.
+# In the DINO ViT, you can extract either all patch tokens or just this CLS token.
+# The CLS token is affected by all other patches via self-attention, so it “sees” the whole image context.
+
+
+
+
+# What is concat_dim?
+
+# concat_dim = 0 means:
+# You concatenate the visual tokens (patches or CLS) with one proprio and one action token per time step, along the patch/token axis.
+# So, for each frame:
+# DINO: [patch1, patch2, ..., patchN, proprio, action]
+# shape: (batch, time, num_patches + 2, emb_dim)
+# DINO_CLS: [CLS, proprio, action]
+# shape: (batch, time, 3, emb_dim)
+
+# concat_dim = 1 means:
+# You expand/repeat the proprio and action embeddings to the same number of tokens as the visual tokens, then concatenate along the feature dimension (the last axis, emb_dim).
+# For each visual token, you append its own copy of the proprio and action embedding:
+# DINO: Each patch token becomes [patch_i_emb | proprio_emb | action_emb], so:
+# shape: (batch, time, num_patches, emb_dim + action_dim + proprio_dim)
+# DINO_CLS: Each CLS token becomes [CLS_emb | proprio_emb | action_emb], shape: (batch, time, 1, emb_dim + action_dim + proprio_dim)
+# Action/proprio are repeated for every patch (or CLS) token.
+
+#not sure yet, but check the below
+# | Model     | z\[:, t, :-2, :]     | z\[:, t, -2, :] | z\[:, t, -1, :] | For safety filter use:                                   |
+# | --------- | -------------------- | --------------- | --------------- | -------------------------------------------------------- |
+# | DINO      | patch tokens (image) | proprio token   | action token    | \[patch tokens, proprio] or mean-pool of patch + proprio |
+# | DINO\_CLS | CLS token (image)    | proprio token   | action token    | \[CLS, proprio]                                          |
+
+# 3. How does it affect indexing?
+# For concat_dim = 0
+# You separate image/proprio/action by token index:
+
+# Image:
+
+# DINO: z[:, t, :-2, :]
+
+# DINO_CLS: z[:, t, 0, :]
+
+# Proprio:
+
+# DINO: z[:, t, -2, :]
+
+# DINO_CLS: z[:, t, 1, :]
+
+# Action:
+
+# DINO: z[:, t, -1, :]
+
+# DINO_CLS: z[:, t, 2, :]
+
+# If you want image + proprio:
+
+# DINO: z[:, t, :-1, :]
+# (all tokens except the last = action)
+
+# DINO_CLS: z[:, t, :2, :]
+# (first two tokens: CLS, proprio)
+
+# For concat_dim = 1
+# You separate image/proprio/action by feature index:
+
+# For every token (patch or CLS), the vector looks like
+# [visual_token | proprio | action]
+
+# To extract just the image part:
+
+# DINO: z[:, t, :, :emb_dim]
+
+# DINO_CLS: z[:, t, 0, :emb_dim]
+
+# To extract proprio:
+
+# DINO: z[:, t, :, emb_dim:emb_dim+proprio_dim]
+
+# DINO_CLS: z[:, t, 0, emb_dim:emb_dim+proprio_dim]
+
+# To extract action:
+
+# DINO: z[:, t, :, emb_dim+proprio_dim:]
+
+# DINO_CLS: z[:, t, 0, emb_dim+proprio_dim:]
+
+# If you want image + proprio, concatenate those feature slices.
+
+#summary
+# | concat\_dim | Model     | Shape            | Image           | Proprio          | Action          | Image+Proprio   |
+# | :---------: | :-------- | :--------------- | :-------------- | :--------------- | :-------------- | :-------------- |
+# |    **0**    | DINO      | (B, T, N+2, E)   | `z[:,:, :-2,:]` | `z[:,:, -2,:]`   | `z[:,:, -1,:]`  | `z[:,:, :-1,:]` |
+# |    **0**    | DINO\_CLS | (B, T, 3, E)     | `z[:,:, 0,:]`   | `z[:,:, 1,:]`    | `z[:,:, 2,:]`   | `z[:,:, :2,:]`  |
+# |    **1**    | DINO      | (B, T, N, E+A+P) | `z[:,:,:,:E]`   | `z[:,:,:,E:E+P]` | `z[:,:,:,E+P:]` | `z[:,:,:,:E+P]` |
+# |    **1**    | DINO\_CLS | (B, T, 1, E+A+P) | `z[:,:,0,:E]`   | `z[:,:,0,E:E+P]` | `z[:,:,0,E+P:]` | `z[:,:,0,:E+P]` |
+
+
+#search self.emb_dim to find dim for each of dino_cls and dino and resnet and r3m.
+
+
+# Summary
+# emb_dim is set by the vision encoder.
+
+# Proprio and action encoders are initialized to output vectors of length emb_dim.
+
+# If action repetition doesn't fill emb_dim perfectly, the last elements are padded with zeros (no fractional repeats).
+
+# All tokens—vision, proprio, and action—are thus the same length for concatenation and transformer processing.
+
+
+
+
+
+# ****General Steps for Any Vision Backbone****
+# Write a wrapper (in models/your_model.py) that provides forward, sets .emb_dim, .latent_ndim, .name.
+
+# Create a YAML config in conf/encoder/your_model.yaml that sets _target_ to the class.
+
+# Point your main config to it with - encoder: your_model.
+
+
+
+
+#some notes for r3m:
+# _target_: models.encoder.r3m.load_r3m in r3m.yaml tells Hydra to call the function load_r3m(modelid=…).
+
+# Inside load_r3m, it downloads or finds two files in ~/.model_checkpoints/r3m/r3m_18/:
+
+# model.pt → the pretrained R3M weights for ResNet-18
+
+# config.yaml → the original training config for R3M.
+
+# load_r3m then prunes config.yaml to only the args R3M.__init__ cares about, instantiates an R3M object (from models/models_r3m.py), wraps it in DataParallel, and calls load_state_dict with the downloaded weights.
+
+# The final return value is a ready‐to‐use R3M encoder module with pretrained weights loaded.
+
+# Thus, yes, models/models_r3m.py is definitely used (it defines the R3M class), and yes, the checkpoint in model.pt is loaded into that class.
+
+
+
+
+# note that eval_state in each file tells us if we can have success or still not sucess
+
+
+
+##VERY IMPORTANT HOW WE PREDICT LATENTS AND TRAIN VITPREDICTOR
+# In VWorldModel.forward, you first encode a full window of num_hist+num_pred frames 
+# (with their proprio and action embeddings) into a latent tensor z of shape (B, num_hist+num_pred, P, D),
+#  then split it into source z_src = z[:, :num_hist] and target z_tgt = z[:, num_pred:].
+#   You call self.predict(z_src), which under the hood flattens z_src to (B, num_hist*P, D), 
+#   runs ViTPredictor.forward (adding positional embeddings and applying each attention+feed‐forward 
+#   residual block with a causal mask, but never changing sequence length), and reshapes back to (B, num_hist, P, D). 
+#   You then compute an MSE loss only on the final block z_pred[:, -1, :, :] versus z_tgt[:, -1, :, :], 
+#   training the predictor to make its last output match the next‐frame latent.
+#   In VWorldModel.rollout, you repeatedly take the last num_hist frames of the accumulated z, 
+#   call self.predict on that slice to get z_pred, extract z_new = z_pred[:, -1:, :, :] as the 
+#   predicted next frame, replace its action token with the true action via self.
+#   replace_actions_from_z, append z_new to z, and loop until all planned actions are
+#   applied—always discarding the predictor’s rewrites of earlier frames and only appending its newly predicted last block.
+
+# so,ViT “modifies” the embedding you fed in at time t (looking at previous embeddings), and that modified vector is your z t+1
+# You then slide the window forward and repeat. check the for loop in rollout function in visual_world_model.py
+
+# inputs: sequence of past frames including zt
+# Causal ViT: computes updated embeddings for each input position
+# Outputs: you slice off the last updated embeddings and call them zt+1
+ 
+
+ #note that encode(...) used only in visual_world_model when needing the predictor
+#  but encode_obs is used in train and plan and the proprio+image latent is what is used elsewhere

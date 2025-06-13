@@ -1,12 +1,28 @@
 from gym.envs.registration import register
 # from .pointmaze import U_MAZE
+# from .dubins.dubins import DubinsEnv
+import gym
+
+# Register DubinsEnv with Gym
+register(
+    id='dubins',
+    entry_point='env.dubins.dubins_wrapper:DubinsWrapper',
+    max_episode_steps=500,
+)
+
+register(
+    id='maniskill',
+    entry_point='env.maniskill.maniskill_wrapper:ManiskillWrapper',
+    max_episode_steps=500,
+)
 register(
     id="pusht",
     entry_point="env.pusht.pusht_wrapper:PushTWrapper",
     max_episode_steps=300,
     reward_threshold=1.0,
 )
-##commented for now to avoid calling mujoco and installing it
+
+##i added this. commented for now to avoid calling mujoco and installing it
 # register(
 #     id='point_maze',
 #     entry_point='env.pointmaze:PointMazeWrapper',

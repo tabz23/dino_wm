@@ -23,12 +23,25 @@ from concurrent.futures import ThreadPoolExecutor
 from metrics.image_metrics import eval_images
 from utils import slice_trajdict_with_t, cfg_to_dict, seed, sample_tensors
 
+
+#i added below
+print("torch.cuda.is_available()  →", torch.cuda.is_available())
+print("torch.cuda.device_count() →", torch.cuda.device_count())
+for i in range(torch.cuda.device_count()):
+    print(f"  GPU {i}: {torch.cuda.get_device_name(i)}")
+
+
+
+
 warnings.filterwarnings("ignore")
 log = logging.getLogger(__name__)
 
 class Trainer:
     def __init__(self, cfg):
         self.cfg = cfg
+        #i added this
+        self.global_step = 0
+        
         with open_dict(cfg):
             cfg["saved_folder"] = os.getcwd()
             log.info(f"Model saved dir: {cfg['saved_folder']}")
@@ -68,6 +81,19 @@ class Trainer:
         self.num_reconstruct_samples = self.cfg.training.num_reconstruct_samples
         self.total_epochs = self.cfg.training.epochs
         self.epoch = 0
+
+
+    ##added below myself
+    # Immediately log how many DDP processes were spawned and which device each is on:
+        print(f"→ accelerate.num_processes = {self.accelerator.num_processes}")
+        print(f"→ accelerate.local_process_index = {self.accelerator.local_process_index}")
+        print(f"→ accelerate.device = {self.accelerator.device}")
+
+        # For extra confirmation, also print PyTorch’s view of available GPUs:
+        print(f"torch.cuda.device_count() = {torch.cuda.device_count()}")
+        print(f"torch.cuda.current_device() = {torch.cuda.current_device()}")
+        print(f"torch.cuda.get_device_name({torch.cuda.current_device()}) = "
+        f"{torch.cuda.get_device_name(torch.cuda.current_device())}")
 
         assert cfg.training.batch_size % self.accelerator.num_processes == 0, (
             "Batch size must be divisible by the number of processes. "
@@ -473,6 +499,29 @@ class Trainer:
             loss_components = {
                 key: value.mean().item() for key, value in loss_components.items()
             }
+            ##I ADDED THIS
+            # if i % 50 == 0:  # Print every 50 iterations 
+            #     print(f"Epoch {self.epoch}, Iter {i}/{len(self.dataloaders['train'])}: Loss = {loss.item():.4f}")##I ADDED THIS
+        
+            #I ADDED THIS
+            # Correct version of what you added
+            self.global_step += 1
+
+            if self.global_step % 50 == 0:
+                metrics = {
+                    "train/total_loss": loss.item(),  # use loss here
+                    **{f"train/{k}_loss": v for k, v in loss_components.items()},
+                    "step": self.global_step
+                }
+                self.accelerator.log(metrics, step=self.global_step)
+
+                tqdm.write(
+                    f"Step {self.global_step} — total={loss.item():.4f} " +
+                    ", ".join(f"{k}={v:.4f}" for k,v in loss_components.items())
+                )
+
+                        
+
             if self.cfg.has_decoder and plot:
                 # only eval images when plotting due to speed
                 if self.cfg.has_predictor:
