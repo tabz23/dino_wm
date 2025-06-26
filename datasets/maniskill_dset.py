@@ -173,10 +173,9 @@ class ManiSkillDataset(TrajDataset):
         self.normalize_states = normalize_states
         self.with_costs = with_costs
 
-        self.states = torch.load(self.data_path / "states.pth").float()
-        self.actions = torch.load(self.data_path / "actions.pth").float()
-        self.seq_lengths = torch.load(self.data_path / "seq_lengths.pth").long()
-        self.costs = torch.load(self.data_path / "costs.pth").float()
+        self.states = torch.load(self.data_path / "states.pth")  # list of [T_i, 9]
+        self.actions = torch.load(self.data_path / "actions.pth")  # list of [T_i, 1]
+        self.seq_lengths = torch.load(self.data_path / 'seq_lengths.pth')  # list of ints
 
         self.n_rollout = n_rollout
         if self.n_rollout:

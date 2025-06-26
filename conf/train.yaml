@@ -48,7 +48,7 @@ concat_dim: 1
 normalize_action: False
 
 # action encoder
-action_emb_dim: 1
+action_emb_dim: 10
 num_action_repeat: 1
 
 # proprio encoder

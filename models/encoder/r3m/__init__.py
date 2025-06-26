@@ -58,7 +58,7 @@ def remove_language_head(state_dict):
 
 def load_r3m(modelid):
     # home = os.path.join(expanduser("~"), ".model_checkpoints", "r3m")
-    home = "/storage1/sibai/Active/ihab/tmp/.model_checkpoints/r3m"
+    home = "/storage1/fs1/sibai/Active/ihab/tmp/.model_checkpoints/r3m"
 
     if modelid == "resnet50":
         foldername = "r3m_50"

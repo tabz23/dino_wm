@@ -22,7 +22,7 @@ from datetime import timedelta
 from concurrent.futures import ThreadPoolExecutor
 from metrics.image_metrics import eval_images
 from utils import slice_trajdict_with_t, cfg_to_dict, seed, sample_tensors
-
+import sys
 
 #i added below
 print("torch.cuda.is_available()  →", torch.cuda.is_available())
@@ -507,7 +507,7 @@ class Trainer:
             # Correct version of what you added
             self.global_step += 1
 
-            if self.global_step % 50 == 0:
+            if self.global_step % 500 == 0:
                 metrics = {
                     "train/total_loss": loss.item(),  # use loss here
                     **{f"train/{k}_loss": v for k, v in loss_components.items()},
@@ -519,6 +519,7 @@ class Trainer:
                     f"Step {self.global_step} — total={loss.item():.4f} " +
                     ", ".join(f"{k}={v:.4f}" for k,v in loss_components.items())
                 )
+                # sys.stdout.flush()
 
                         
 

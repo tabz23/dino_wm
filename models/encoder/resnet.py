@@ -10,6 +10,7 @@ class resnet18(nn.Module):
         unit_norm: bool = False,
     ):
         super().__init__()
+        print("is resnet pretrained?",pretrained)
         resnet = torchvision.models.resnet18(pretrained=pretrained)
         self.resnet = nn.Sequential(*list(resnet.children())[:-1])
         self.flatten = nn.Flatten()

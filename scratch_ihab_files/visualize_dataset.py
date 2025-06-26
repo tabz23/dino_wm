@@ -19,12 +19,12 @@ save_dir = "/storage1/sibai/Active/ihab/research_new/dino_wm/scratch_ihab_files/
 os.makedirs(save_dir, exist_ok=True)
 
 # 3. Load the global episode-wise tensors
-actions     = torch.load("/storage1/sibai/Active/ihab/research_new/datasets_dino/dubins/actions.pth")
-states      = torch.load("/storage1/sibai/Active/ihab/research_new/datasets_dino/dubins/states.pth")
-seq_lengths = torch.load("/storage1/sibai/Active/ihab/research_new/datasets_dino/dubins/seq_lengths.pth")
+actions     = torch.load("/storage1/sibai/Active/ihab/research_new/SafeDreamer/hj/cargoaldata/actions.pth")
+states      = torch.load("/storage1/sibai/Active/ihab/research_new/SafeDreamer/hj/cargoaldata/states.pth")
+seq_lengths = torch.load("/storage1/sibai/Active/ihab/research_new/SafeDreamer/hj/cargoaldata/seq_lengths.pth")
 
 # 4. Load and sort observation files
-obs_dir = Path("/storage1/sibai/Active/ihab/research_new/datasets_dino/dubins/obses")
+obs_dir = Path("/storage1/sibai/Active/ihab/research_new/SafeDreamer/hj/cargoaldata/obses")
 def episode_index(fn):
     return int(re.search(r"\d+", fn.name).group())
 obs_paths = sorted(obs_dir.glob("episode_*.pth*"), key=episode_index)
@@ -81,11 +81,11 @@ from pathlib import Path
 import re
 from torch.utils.data import Dataset
 # 1. Load the global episode-wise tensors (shape: [num_episodes, episode_len, dim])
-actions     = torch.load("/storage1/sibai/Active/ihab/research_new/datasets_dino/dubins/actions.pth")
-states      = torch.load("/storage1/sibai/Active/ihab/research_new/datasets_dino/dubins/states.pth")
-seq_lengths = torch.load("/storage1/sibai/Active/ihab/research_new/datasets_dino/dubins/seq_lengths.pth")  # e.g., tensor([100, 100, ...])
+actions     = torch.load("/storage1/sibai/Active/ihab/research_new/SafeDreamer/hj/cargoaldata/actions.pth")
+states      = torch.load("/storage1/sibai/Active/ihab/research_new/SafeDreamer/hj/cargoaldata/states.pth")
+seq_lengths = torch.load("/storage1/sibai/Active/ihab/research_new/SafeDreamer/hj/cargoaldata/seq_lengths.pth")  # e.g., tensor([100, 100, ...])
 # 2. Gather & sort the observation files
-obs_dir = Path("/storage1/sibai/Active/ihab/research_new/datasets_dino/dubins/obses")
+obs_dir = Path("/storage1/sibai/Active/ihab/research_new/SafeDreamer/hj/cargoaldata/obses")
 def episode_index(fn):
     return int(re.search(r"\d+", fn.name).group())
 obs_paths = sorted(obs_dir.glob("episode_*.pth*"), key=episode_index)
