@@ -13,6 +13,7 @@ venv/
 .dino_wm/
 *.png
 *.logs
+*.log
 *.txt
 *.mp4
 *.pth

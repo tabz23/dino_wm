@@ -1,10 +1,11 @@
 #!/bin/bash
 #BSUB -n 16
-#BSUB -q general-interactive
+#BSUB -q general
 #BSUB -R 'rusage[mem=102GB]'
 #BSUB -M 100GB
 #BSUB -R 'gpuhost'
-#BSUB -gpu "num=1:gmem=30"
+#BSUB -gpu "num=1:gmem=1"
+#BSUB -m compute1-exec-358
 #BSUB -a 'docker(continuumio/anaconda3:2021.11)'
 #BSUB -W 400
 #BSUB -J dino_wm_job
@@ -44,3 +45,6 @@ python -m accelerate.commands.launch train.py --config-name "train copy.yaml" en
 
 
 
+
+
+#bjobs -q 787317

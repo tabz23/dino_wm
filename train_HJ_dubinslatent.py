@@ -66,7 +66,7 @@ def get_args_and_merge_config():
     parser = argparse.ArgumentParser("DDPG HJ on DINO latent Dubins")
     parser.add_argument(
         "--dino_ckpt_dir", type=str,
-        default="/storage1/sibai/Active/ihab/research_new/checkpt_dino/outputs/dubins",
+        default="/storage1/fs1/sibai/Active/ihab/research_new/checkpt_dino/outputs/dubins",
         help="Where to find the DINO-WM checkpoints"
     )
     parser.add_argument(
@@ -77,6 +77,16 @@ def get_args_and_merge_config():
         "--gamma-pyhj", type=float, default=None,
         help="(Optional) override gamma_pyhj from the config"
     )
+    parser.add_argument(
+    "--with_proprio", action="store_true",
+    help="Flag to include proprioceptive information in latent encoding"
+    )
+    parser.add_argument(
+    "--dino_encoder", type=str, default="dino",
+    help="Which encoder to use: dino, r3m, vc1, etc."
+    )
+
+    
     args, remaining = parser.parse_known_args()
 
     # 2) Load all keys & values from the YAML (no `defaults:` wrapper needed)
@@ -106,7 +116,7 @@ class LatentDubinsEnv(gym.Env):
     Wraps the classic Gym-based DubinsEnv into a Gymnasium-compatible Env.
     Encodes observations into DINO-WM latent space and uses info['h'] as reward.
     """
-    def __init__(self, ckpt_dir: str, device: str):
+    def __init__(self, ckpt_dir: str, device: str, with_proprio: bool):
         super().__init__()
         # underlying Gym env
         self.env = DubinsEnv()
@@ -124,10 +134,13 @@ class LatentDubinsEnv(gym.Env):
         reset_out = self.env.reset()
         # Gym reset returns obs; if obs is tuple unpack
         obs = reset_out[0] if isinstance(reset_out, tuple) else reset_out
+        self.with_proprio = with_proprio
+        print("using proprio:", self.with_proprio)
         z = self._encode(obs)
         print(f"Example latent state z shape: {z.shape}")
         self.observation_space = Box(low=-np.inf, high=np.inf, shape=z.shape, dtype=np.float32)
         self.action_space = self.env.action_space
+
 
     def reset(self):
         """
@@ -191,21 +204,39 @@ class LatentDubinsEnv(gym.Env):
             
             
             # flatten visual patches and concat proprio
-            z_vis = lat['visual'].reshape(1, -1)  # (1, N_patches, E_dim) -> (1, N_patches*E_dim)
-            z_prop = lat['proprio']  # (1, D_prop)
+            if (self.with_proprio):
+                
+                z_vis = lat['visual'].reshape(1, -1)  # (1, N_patches, E_dim) -> (1, N_patches*E_dim)
+                z_prop = lat['proprio']  # (1, D_prop)
+                
+                # flatten visual patches and concatenate proprio
+                z_vis = lat['visual'].reshape(1, -1)  # (1, N_patches * E_dim) torch.Size([1, 75264])
+                z_prop = lat['proprio']  # (1, 1, D_prop) ([1, 1, 10])
+                z_prop=z_prop.squeeze(0)
+                
+                # Concatenate both visual and proprio embeddings
+                z = torch.cat([z_vis, z_prop], dim=-1)#torch.Size([1, 75274])
+                
+                # print(z_prop.shape)torch.Size([1, 10])
+                # print(z_prop.cpu().numpy())# when using dummyreapeatencoder[[2.2927914 1.471216  2.6900113 2.2927914 1.471216  2.6900113 2.2927914 1.471216  2.6900113 0.       ]]
+                
+                return z.squeeze(0).cpu().numpy()                       #dino torch.size(75274,)
             
-            # flatten visual patches and concatenate proprio
-            z_vis = lat['visual'].reshape(1, -1)  # (1, N_patches * E_dim) torch.Size([1, 75264])
-            z_prop = lat['proprio']  # (1, 1, D_prop) ([1, 1, 10])
-            z_prop=z_prop.squeeze(0)
-            
-            # Concatenate both visual and proprio embeddings
-            z = torch.cat([z_vis, z_prop], dim=-1)#torch.Size([1, 75274])
-            return z.squeeze(0).cpu().numpy()#torch.size(75274,)
+            else:
+                z_vis = lat['visual'].reshape(1, -1)  # (1, N_patches, E_dim) -> (1, N_patches*E_dim)
+                # z_prop = lat['proprio']  # (1, D_prop)
+                
+                z_vis = lat['visual'].reshape(1, -1)  # (1, N_patches * E_dim) torch.Size([1, 75264])
+          
+                # print(z_vis.squeeze(0).cpu().numpy().shape) #dino torch.size(75264,)
+                # print(z_vis.squeeze(0).cpu().numpy()[:-6])
+                
+                return z_vis.squeeze(0).cpu().numpy()
+                
 
 import os
 # point Matplotlib to /tmp (or any other writable dir)
-os.environ['MPLCONFIGDIR'] = '/storage1/sibai/Active/ihab/tmp'
+os.environ['MPLCONFIGDIR'] = '/storage1/fs1/sibai/Active/ihab/tmp'
 # make sure it exists
 os.makedirs(os.environ['MPLCONFIGDIR'], exist_ok=True)
 
@@ -298,22 +329,22 @@ def main():
     args.total_episodes    = int(args.total_episodes)
     args.batch_size_pyhj   = int(args.batch_size_pyhj)
     args.buffer_size       = int(args.buffer_size)
-
+    args.dino_ckpt_dir = os.path.join(args.dino_ckpt_dir, args.dino_encoder)
     # 2) init W&B + TB writer + logger
     import wandb
-    wandb.init(project="ddpg-hj-latent-dubins", config=vars(args))
-    writer    = SummaryWriter(log_dir="runs/ddpg_hj_latent")
+    wandb.init(project=f"ddpg-hj-latent-dubins-{args.dino_encoder}", config=vars(args))
+    writer    = SummaryWriter(log_dir=f"runs/ddpg_hj_latent/{args.dino_encoder}")
     wb_logger = WandbLogger()
     wb_logger.load(writer)    # must load the TB writer
     logger    = wb_logger     # use W&B for offpolicy_trainer
 
     # 3) make your latent envs
     train_envs = DummyVectorEnv(
-        [lambda: LatentDubinsEnv(args.dino_ckpt_dir, args.device)
+        [lambda: LatentDubinsEnv(args.dino_ckpt_dir, args.device, args.with_proprio)
          for _ in range(args.training_num)]
     )
     test_envs = DummyVectorEnv(
-        [lambda: LatentDubinsEnv(args.dino_ckpt_dir, args.device)
+        [lambda: LatentDubinsEnv(args.dino_ckpt_dir, args.device, args.with_proprio)
          for _ in range(args.test_num)]
     )
 
@@ -383,10 +414,10 @@ def main():
 
     # 10) choose headings & helper env
     thetas     = [0.0, np.pi/4, np.pi/2, 3*np.pi/4]
-    helper_env = LatentDubinsEnv(args.dino_ckpt_dir, args.device)
+    helper_env = LatentDubinsEnv(args.dino_ckpt_dir, args.device, args.with_proprio)
 
-    # 11) training loop
-    log_path = Path("runs/ddpg_hj_latent")
+    # 11) training loop 
+    log_path = Path(f"runs/ddpg_hj_latent/{args.dino_encoder}")
     for epoch in range(1, args.total_episodes + 1):
         print(f"\n=== Epoch {epoch}/{args.total_episodes} ===")
 
@@ -431,3 +462,8 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+
+# for using proprio: python /storage1/fs1/sibai/Active/ihab/research_new/dino_wm/train_HJ_dubinslatent.py --with_proprio --dino_encoder dino
+#for not using proprio: python /storage1/fs1/sibai/Active/ihab/research_new/dino_wm/train_HJ_dubinslatent.py --dino_encoder dino
