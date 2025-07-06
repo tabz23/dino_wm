@@ -2,6 +2,7 @@
 # import numpy as np
 # from pathlib import Path
 # import sys
+# # sys.path.append('/Users/maxwellastafyev/Desktop/Research_project/Manipulation_tasks/dino_wm')
 # from einops import rearrange
 # from typing import Callable, Optional
 # from datasets.traj_dset import TrajDataset, TrajSlicerDataset, get_train_val_sliced, split_traj_datasets
@@ -24,10 +25,9 @@
 #         self.normalize_states = normalize_states
 #         self.with_costs = with_costs
 
-#         self.states = torch.load(self.data_path / "states.pth").float()
-#         self.actions = torch.load(self.data_path / "actions.pth").float()
-#         self.seq_lengths = torch.load(self.data_path / "seq_lengths.pth").long()
-#         self.costs = torch.load(self.data_path / "costs.pth").float()
+#         self.states = torch.load(self.data_path / "states.pth")  # list of [T_i, 9]
+#         self.actions = torch.load(self.data_path / "actions.pth")  # list of [T_i, 1]
+#         self.seq_lengths = torch.load(self.data_path / 'seq_lengths.pth')  # list of ints
 
 #         self.n_rollout = n_rollout
 #         if self.n_rollout:
@@ -105,6 +105,17 @@
 #         elif isinstance(imgs, torch.Tensor):
 #             return rearrange(imgs, "b h w c -> b c h w") / 255.0
         
+#     def get_data_mean_std(self, data, traj_lengths):
+#         all_data = []
+#         for traj in range(len(traj_lengths)):
+#             traj_len = traj_lengths[traj]
+#             traj_data = data[traj, :traj_len]
+#             all_data.append(traj_data)
+#         all_data = torch.vstack(all_data)
+#         data_mean = torch.mean(all_data, dim=0)
+#         data_std = torch.std(all_data, dim=0)
+#         return data_mean, data_std
+        
 # def load_maniskill_slice_train_val(
 #         transform,
 #         data_path,
@@ -150,7 +161,7 @@ import torch
 import numpy as np
 from pathlib import Path
 import sys
-# sys.path.append('/Users/maxwellastafyev/Desktop/Research_project/Manipulation_tasks/dino_wm')
+sys.path.append('/Users/maxwellastafyev/Desktop/Research_project/Manipulation_tasks/dino_wm')
 from einops import rearrange
 from typing import Callable, Optional
 from datasets.traj_dset import TrajDataset, TrajSlicerDataset, get_train_val_sliced, split_traj_datasets
@@ -173,9 +184,10 @@ class ManiSkillDataset(TrajDataset):
         self.normalize_states = normalize_states
         self.with_costs = with_costs
 
-        self.states = torch.load(self.data_path / "states.pth")  # list of [T_i, 9]
-        self.actions = torch.load(self.data_path / "actions.pth")  # list of [T_i, 1]
-        self.seq_lengths = torch.load(self.data_path / 'seq_lengths.pth')  # list of ints
+        self.states = torch.load(self.data_path / "states.pth").float()
+        self.actions = torch.load(self.data_path / "actions.pth").float()
+        self.seq_lengths = torch.load(self.data_path / "seq_lengths.pth").long()
+        self.costs = torch.load(self.data_path / "costs.pth").float()
 
         self.n_rollout = n_rollout
         if self.n_rollout:
@@ -187,7 +199,7 @@ class ManiSkillDataset(TrajDataset):
         self.actions = self.actions[:n]
         self.seq_lengths = self.seq_lengths[:n]
         
-        self.proprios = self.states[..., 26:58].clone()
+        self.proprios = self.states[..., 39:89].clone()
 
         self.action_dim = self.actions.shape[-1]
         self.state_dim = self.states.shape[-1]

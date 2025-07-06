@@ -4,7 +4,7 @@ defaults:
   # - encoder: dino   #r3m 
   - encoder: r3m #r3m  
   - action_encoder: proprio
-  - proprio_encoder: dummy
+  - proprio_encoder: proprio
   # - decoder: vqvae #transposed_conv
   - decoder: transposed_conv
   - predictor: vit

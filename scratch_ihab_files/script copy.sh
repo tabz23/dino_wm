@@ -8,14 +8,13 @@
 # source /storage1/sibai/Active/ihab/miniconda3/bin/activate
 # source /storage1/fs1/sibai/Active/ihab/miniconda3/bin/activate
 source activate
-conda activate dreamer
-cd /storage1/sibai/Active/ihab/research_new/SafeDreamer/hj
-export DATASET_DIR=/storage1/fs1/sibai/Active/ihab/research_new/datasets_dino
-export TORCH_HOME=/storage1/fs1/sibai/Active/ihab/tmp/torch
+conda activate dino_wm
+cd /storage1/sibai/Active/ihab/research_new/dino_wm
+export DATASET_DIR=/storage1/sibai/Active/ihab/research_new/datasets_dino
+export TORCH_HOME=/storage1/sibai/Active/ihab/tmp/torch
 # python ppo_rgb.py --env_id="UnitreeG1PlaceAppleInBowl-v1"   --num_envs=512 --update_epochs=8 --num_minibatches=32   --total_timesteps=1000000000 --num-steps=100 --num-eval-steps=100 --seed=8 --checkpoint="/storage1/sibai/Active/ihab/research_new/ManiSkill/examples/baselines/ppo/runs/UnitreeG1PlaceAppleInBowl-v1__ppo__1__1750651438/final_ckpt.pt"
 # python ppo.py --env_id="UnitreeG1PlaceAppleInBowl-v1"   --num_envs=512 --update_epochs=8 --num_minibatches=32   --total_timesteps=999_000_000 --num-steps=100 --num-eval-steps=100 --checkpoint="/storage1/sibai/Active/ihab/research_new/ManiSkill/examples/baselines/ppo/runs/UnitreeG1PlaceAppleInBowl-v1__ppo__8__1750699220/ckpt_6326.pt"
-python /storage1/sibai/Active/ihab/research_new/SafeDreamer/hj/generate_cargoal_data_dino.py
-
+python "/storage1/sibai/Active/ihab/research_new/dino_wm/env/maniskill/maniskill_generatedata.py"
 # python -m accelerate.commands.launch train.py --config-name "train copy.yaml" env=pusht frameskip=5 num_hist=3
 #WANDB_MODE=disabled python train.py --config-name "train copy.yaml" env=maniskill frameskip=5 num_hist=3
 #WANDB_MODE=disabled accelerate launch train.py --config-name "train copy.yaml" env=maniskill frameskip=5 num_hist=3

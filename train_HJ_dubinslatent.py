@@ -42,6 +42,7 @@ import yaml
 # if not hasattr(shimmy, "GymV22CompatibilityV0") and hasattr(shimmy, "GymV26CompatibilityV0"):
 #     shimmy.GymV22CompatibilityV0 = shimmy.GymV26CompatibilityV0
     
+
 def args_type(default):
     def parse_string(x):
         if default is None:
@@ -73,14 +74,12 @@ def get_args_and_merge_config():
         "--config", type=str, default="train_HJ_configs.yaml",
         help="Path to your flat YAML of hyperparameters"
     )
-    parser.add_argument(
-        "--gamma-pyhj", type=float, default=None,
-        help="(Optional) override gamma_pyhj from the config"
-    )
+    
     parser.add_argument(
     "--with_proprio", action="store_true",
     help="Flag to include proprioceptive information in latent encoding"
     )
+    
     parser.add_argument(
     "--dino_encoder", type=str, default="dino",
     help="Which encoder to use: dino, r3m, vc1, etc."
@@ -103,10 +102,6 @@ def get_args_and_merge_config():
     # 4) Merge everything back into the top‐level args namespace
     for key, val in vars(cfg_args).items():
         setattr(args, key.replace("-", "_"), val)
-
-    # 5) Respect any explicit CLI override of --gamma-pyhj
-    if args.gamma_pyhj is not None:
-        args.gamma_pyhj = args.gamma_pyhj
 
     return args
 
@@ -165,7 +160,7 @@ class LatentDubinsEnv(gym.Env):
         # extract obs if tuple
         obs = obs_out[0] if isinstance(obs_out, tuple) else obs_out
         # override reward with safety metric
-        h_s = info.get('h', 0.0)
+        h_s = info.get('h', 0.0) * 3 ##I multiplied by 3 to make HJ easier to learn
         z_next = self._encode(obs)
         return z_next, h_s, terminated, truncated, info
 
@@ -226,7 +221,7 @@ class LatentDubinsEnv(gym.Env):
                 z_vis = lat['visual'].reshape(1, -1)  # (1, N_patches, E_dim) -> (1, N_patches*E_dim)
                 # z_prop = lat['proprio']  # (1, D_prop)
                 
-                z_vis = lat['visual'].reshape(1, -1)  # (1, N_patches * E_dim) torch.Size([1, 75264])
+                # z_vis = lat['visual'].reshape(1, -1)  # (1, N_patches * E_dim) torch.Size([1, 75264])
           
                 # print(z_vis.squeeze(0).cpu().numpy().shape) #dino torch.size(75264,)
                 # print(z_vis.squeeze(0).cpu().numpy()[:-6])
@@ -248,30 +243,48 @@ import wandb
 
 from PyHJ.data import Batch
 
-def compute_hj_value(x: float, y: float, theta: float,
-                     policy, helper_env, args) -> float:
-    """
-    Compute the Hamilton–Jacobi filter value in *latent* space:
-      1) Reset to (x,y,theta), get raw_obs and h_s from helper_env.step
-      2) Encode raw_obs -> z
-      3) Q = critic(z, actor_old(z))
-      4) return min(Q, h_s)
-    """
-    # 1) Reset underlying latent env (step returns (z, h_s, terminated, ..., info))
-    #    but Gym reset only gives obs, so we peek into info via a dummy step:
-    #    first reset:
-    reset_out = helper_env.env.reset(state=[x, y, theta])
-    # just extract h_s via a zero‐action step (or compute directly):
-    z0, h_s, _, _, _ = helper_env.step(np.zeros(helper_env.action_space.shape))
-    # 2) z0 is already the encoded latent for this state
-    # wrap into a batch of size 1
+# def compute_hj_value(x: float, y: float, theta: float,
+#                      policy, helper_env, args) -> float:
+#     """
+#     Compute the Hamilton–Jacobi filter value in *latent* space:
+#       1) Reset to (x,y,theta), get raw_obs and h_s from helper_env.step
+#       2) Encode raw_obs -> z
+#       3) Q = critic(z, actor_old(z))
+#       4) return min(Q, h_s)
+#     """
+#     # 1) Reset underlying latent env (step returns (z, h_s, terminated, ..., info))
+#     #    but Gym reset only gives obs, so we peek into info via a dummy step:
+#     #    first reset:
+#     reset_out = helper_env.env.reset(state=[x, y, theta])
+#     # just extract h_s via a zero‐action step (or compute directly):
+#     z0, h_s, _, _, _ = helper_env.step(np.zeros(helper_env.action_space.shape))
+#     # 2) z0 is already the encoded latent for this state
+#     # wrap into a batch of size 1
+#     batch = Batch(obs=z0[None], info=Batch())
+#     # 3) get Q(s,π_old(s))
+#     a_old = policy(batch, model="actor_old").act
+#     q_val = policy.critic(batch.obs, a_old).cpu().item()
+#     # 4) HJ filter
+#     return q_val
+def compute_hj_value(x, y, theta, policy, helper_env, args):
+    # set precise state without advancing dynamics
+    obs_dict, _ = helper_env.env.reset(state=[x, y, theta])
+    z0 = helper_env._encode(obs_dict)
     batch = Batch(obs=z0[None], info=Batch())
-    # 3) get Q(s,π_old(s))
     a_old = policy(batch, model="actor_old").act
     q_val = policy.critic(batch.obs, a_old).cpu().item()
-    # 4) HJ filter
-    return min(q_val, float(h_s))
-
+    return q_val
+    #removed below, was wrong
+    # # critic value V̂(s) = Q(s, π_old(s))
+    # z_t = torch.as_tensor(z0, dtype=torch.float32, device=args.device).unsqueeze(0)
+    # a_old = policy.actor_old(z_t)
+    # q_val = policy.critic(batch.obs, a_old).cpu().item()
+    # return q_val            # ← critic prediction only
+# def evaluate_V(state):
+#     tmp_obs = np.array(state)#.reshape(1,-1)
+#     tmp_batch = Batch(obs = tmp_obs, info = Batch())
+#     tmp = policy.critic(tmp_batch.obs, policy(tmp_batch, model="actor_old").act)
+# return tmp.cpu().detach().numpy().flatten()
 
 def plot_hj(policy, helper_env, thetas, args):
     """
@@ -330,10 +343,20 @@ def main():
     args.batch_size_pyhj   = int(args.batch_size_pyhj)
     args.buffer_size       = int(args.buffer_size)
     args.dino_ckpt_dir = os.path.join(args.dino_ckpt_dir, args.dino_encoder)
+    
+    # random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    torch.cuda.manual_seed_all(args.seed)            # if you use CUDA
+    torch.backends.cudnn.deterministic = True        # ▸ slower, deterministic
+    torch.backends.cudnn.benchmark     = False
+    
     # 2) init W&B + TB writer + logger
     import wandb
-    wandb.init(project=f"ddpg-hj-latent-dubins-{args.dino_encoder}", config=vars(args))
-    writer    = SummaryWriter(log_dir=f"runs/ddpg_hj_latent/{args.dino_encoder}")
+    from datetime import datetime
+    timestamp = datetime.now().strftime("%m%d_%H%M")
+    wandb.init(project=f"ddpg-hj-latent-dubins", name=f"ddpg-{args.dino_encoder}-{timestamp}" ,config=vars(args))
+    writer    = SummaryWriter(log_dir=f"runs/ddpg_hj_latent/{args.dino_encoder}-{timestamp}/logs")
     wb_logger = WandbLogger()
     wb_logger.load(writer)    # must load the TB writer
     logger    = wb_logger     # use W&B for offpolicy_trainer
@@ -405,11 +428,14 @@ def main():
         wandb.log({
             "loss/actor":  policy.last_actor_loss,
             "loss/critic": policy.last_critic_loss,
-        }, step=epoch)
+        })
 
     # 9) collectors
     buffer          = VectorReplayBuffer(args.buffer_size, args.training_num)
     train_collector = Collector(policy, train_envs, buffer, exploration_noise=True)
+    print("collecting some data first")
+    train_collector.collect(10000)
+    print("done collecting some data first")
     test_collector  = Collector(policy, test_envs)
 
     # 10) choose headings & helper env
@@ -417,7 +443,7 @@ def main():
     helper_env = LatentDubinsEnv(args.dino_ckpt_dir, args.device, args.with_proprio)
 
     # 11) training loop 
-    log_path = Path(f"runs/ddpg_hj_latent/{args.dino_encoder}")
+    log_path = Path(f"runs/ddpg_hj_latent/{args.dino_encoder}-{timestamp}")
     for epoch in range(1, args.total_episodes + 1):
         print(f"\n=== Epoch {epoch}/{args.total_episodes} ===")
 
@@ -455,7 +481,7 @@ def main():
         wandb.log({
             "HJ_latent/binary":     wandb.Image(fig1),
             "HJ_latent/continuous": wandb.Image(fig2),
-        }, step=epoch)
+        })
         plt.close(fig1); plt.close(fig2)
 
     print("Training complete.")

@@ -70,14 +70,57 @@ class PointMazeDataset(TrajDataset):
     def get_all_actions(self):
         return torch.cat([a[:T] for a, T in zip(self.actions, self.seq_lengths)], dim=0)
 
+    # def get_frames(self, idx, frames):
+    #     obs_dir = self.data_path / "obses"
+    #     image = torch.load(obs_dir / f"episode_{idx:03d}.pth")  # [T, 224, 224, 3]
+
+    #     # Index sequence
+    #     image = image[frames]  # THWC
+    #     image = image / 255.0
+    #     image = rearrange(image, "T H W C -> T C H W")
+    #     if self.transform:
+    #         image = self.transform(image)
+
+    #     proprio = self.proprios[idx][frames]
+    #     act = self.actions[idx][frames]
+    #     state = self.states[idx][frames]
+
+    #     obs = {
+    #         "visual": image,
+    #         "proprio": proprio
+    #     }
+    #     return obs, act, state, {}  # env_info placeholder
     def get_frames(self, idx, frames):
         obs_dir = self.data_path / "obses"
         image = torch.load(obs_dir / f"episode_{idx:03d}.pth")  # [T, 224, 224, 3]
+        
+        # Convert frames to list for easier debugging
+        if isinstance(frames, range):
+            frame_list = list(frames)
+        else:
+            frame_list = frames
+        
+        # Debug information
+        seq_len = self.get_seq_length(idx)
+        image_len = image.shape[0]
+        
+        try:
+            # Index sequence
+            image = image[frames]  # THWC
+        except IndexError as e:
+            print(f"ERROR in episode {idx}:")
+            print(f"  Image shape: {image.shape}")
+            print(f"  Stored sequence length: {seq_len}")
+            print(f"  Actual image frames: {image_len}")
+            print(f"  Frames requested: {frames}")
+            if isinstance(frames, range):
+                print(f"  Frames range: min={min(frame_list)}, max={max(frame_list)}, count={len(frame_list)}")
+            print(f"  Original error: {e}")
+            raise e  # Re-raise the error after logging
 
-        # Index sequence
-        image = image[frames]  # THWC
         image = image / 255.0
         image = rearrange(image, "T H W C -> T C H W")
+
         if self.transform:
             image = self.transform(image)
 
@@ -90,7 +133,6 @@ class PointMazeDataset(TrajDataset):
             "proprio": proprio
         }
         return obs, act, state, {}  # env_info placeholder
-
     def __getitem__(self, idx):
         return self.get_frames(idx, range(self.get_seq_length(idx)))
 

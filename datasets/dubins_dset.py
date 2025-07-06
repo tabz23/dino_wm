@@ -214,6 +214,19 @@ class PointMazeDataset(TrajDataset):
     def get_frames(self, idx, frames):
         obs_dir = self.data_path / "obses"
         image = torch.load(obs_dir / f"episode_{idx:03d}.pth")  # [T, 224, 224, 3]
+        try:
+        # Index sequence
+            image = image[frames]  # THWC
+        except IndexError as e:
+            print(f"ERROR in episode {idx}:")
+            print(f"  Image shape: {image.shape}")
+            print(f"  Sequence length: {self.get_seq_length(idx)}")
+            print(f"  Frames requested: {frames}")
+            if isinstance(frames, range):
+                print(f"  Frames range: {list(frames)}")
+            print(f"  Original error: {e}")
+            raise e  # Re-raise the error after logging
+
 
         # Index sequence
         image = image[frames]  # THWC

@@ -43,7 +43,7 @@ python -m accelerate.commands.launch train.py --config-name "train copy.yaml" en
 # mkdir -p /storage1/fs1/sibai/Active/ihab/conda/pkgs
 export LSF_DOCKER_VOLUMES="/storage1/fs1/sibai/Active:/storage1/fs1/sibai/Active" 
 export LSF_DOCKER_SHM_SIZE='64g'  
-bsub -n 32 -Is -q general-interactive -R 'rusage[mem=202GB]' -M 200GB -R 'gpuhost' -gpu "num=1:gmem=30G"  -a 'docker(continuumio/anaconda3:2021.11)'  /bin/bash 
+bsub -n 5 -Is -q general-interactive -R 'rusage[mem=52GB]' -M 50GB -R 'gpuhost' -gpu "num=1:gmem=30G"  -a 'docker(continuumio/anaconda3:2021.11)'  /bin/bash 
 # bsub -n 12 -Is -q general-interactive -R 'rusage[mem=32GB]' -M 30 -R 'gpuhost' -gpu "num=1:gmem=10G"  -a 'docker(continuumio/anaconda3:2021.11)'  /bin/bash 
 # bsub -n 12 -Is -q general-interactive -R 'rusage[mem=32GB]' -M 30 -R 'gpuhost' -gpu "num=1:gmem=10G" -a 'docker(nvidia/cuda:11.8.0-base-ubuntu22.04)' /bin/bash
 # bsub -n 12 -Is -q general-interactive -R 'rusage[mem=32GB]' -M 30 -R 'gpuhost' -gpu "num=1:gmem=1G" -a 'docker(nvcr.io/nvidia/pytorch:23.10-py3)' /bin/bash
@@ -64,6 +64,7 @@ bjobs -l 663370 #check ram w hek 5bar
 source /opt/conda/etc/profile.d/conda.sh 
 conda activate dino_wm_ris    
 cd /storage1/fs1/sibai/Active/ihab/research_new/dino_wm
+
 
 python train.py --config-name "train copy.yaml" env=dubins frameskip=5 num_hist=3
 python -m accelerate.commands.launch train.py --config-name "train copy.yaml" env=point_maze frameskip=5 num_hist=3
@@ -93,3 +94,8 @@ bsub -n 1 -Is -q artsci-interactive \
 # NVIDIAA40
 # NVIDIAA10080GBPCIe
 # NVIDIAA100_SXM4_80GB
+
+
+
+bsub -n 5  -q general -R 'rusage[mem=52GB]' -M 50GB -R 'gpuhost' -gpu "num=1:gmem=15G"  -a 'docker(continuumio/anaconda3:2021.11)'  /bin/bash -c python /storage1/fs1/sibai/Active/ihab/research_new/dino_wm/train_HJ_dubinslatent.py --dino_encoder r3m  --seed 1 --gamma-pyhj 0.98
+

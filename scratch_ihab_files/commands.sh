@@ -12,7 +12,7 @@ export DATASET_DIR=/storage1/sibai/Active/ihab/research_new/datasets_dino
 export TORCH_HOME=/storage1/sibai/Active/ihab/tmp/torch
 # export HOME=/storage1/sibai/Active/ihab/tmp/
 
-python ppo.py --env_id="UnitreeG1PlaceAppleInBowl-v1"   --num_envs=512 --update_epochs=8 --num_minibatches=32   --total_timesteps=100_000_000 --num-steps=100 --num-eval-steps=100 --checkpoint="/storage1/sibai/Active/ihab/research_new/ManiSkill/examples/baselines/ppo/runs/UnitreeG1PlaceAppleInBowl-v1__ppo__8__1750699220/ckpt_6326.pt"
+python python "/storage1/sibai/Active/ihab/research_new/dino_wm/env/maniskill/maniskill_generatedata.py"
 
 # python train.py --config-name "train.yaml" env=dubins frameskip=5 num_hist=3
 # accelerate launch train.py --config-name "train copy.yaml" env=pusht frameskip=5 num_hist=3
