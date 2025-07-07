@@ -30,7 +30,6 @@ from deslib.dcs.ola     import OLA
 from deslib.dcs.lca     import LCA
 from deslib.dcs.mcb     import MCB
 from deslib.dcs.rank    import Rank
-
 # For loading your HJ policies
 from PyHJ.data import Collector, VectorReplayBuffer, Batch
 from PyHJ.trainer import offpolicy_trainer
@@ -378,8 +377,176 @@ def compute_des_ensemble_hj_grid(des_method, ensemble, theta, x_min=-3.0, x_max=
                 hj_values[ix, iy] = ensemble[0]._compute_hj_value([x, y, theta])
     
     return hj_values, selected_models
+# def compute_dcs_selector_hj_grid(
+#     selector,        # either a DES or DCS object
+#     ensemble,        # list of HJValueFunctionClassifier
+#     theta,
+#     x_min, x_max, y_min, y_max,
+#     nx=100, ny=100
+# ):
+#     """
+#     Compute HJ values using DCS ensemble selection over a grid.
+#     Fixed version that handles DCS methods properly.
+#     """
+#     xs = np.linspace(x_min, x_max, nx)
+#     ys = np.linspace(y_min, y_max, ny)
+#     hj_values = np.zeros((nx, ny))
+#     selected_models = np.zeros((nx, ny), dtype=int)
 
-def compute_dcs_selector_hj_grid(
+#     # Process grid points in batches to avoid memory issues
+#     batch_size = 100
+#     states_batch = []
+#     positions_batch = []
+    
+#     for ix, x in enumerate(xs):
+#         for iy, y in enumerate(ys):
+#             state = np.array([x, y, theta], dtype=np.float32)
+#             states_batch.append(state)
+#             positions_batch.append((ix, iy))
+            
+#             # Process batch when full or at end
+#             if len(states_batch) == batch_size or (ix == len(xs)-1 and iy == len(ys)-1):
+#                 try:
+#                     # Convert to proper format for DCS
+#                     states_array = np.array(states_batch, dtype=np.float32)  # Shape: (batch_size, 3)
+                    
+#                     # Get predictions from DCS selector
+#                     # For DCS methods, we need to use predict directly rather than estimate_competence
+#                     if hasattr(selector, 'predict'):
+#                         predictions = selector.predict(states_array)
+                        
+#                         # Get the selected classifiers for each state
+#                         # Some DCS methods store the selected classifiers in different ways
+#                         if hasattr(selector, 'classify_with_ds'):
+#                             # Use the internal method that returns both predictions and selected classifiers
+#                             try:
+#                                 selected_classifiers = []
+#                                 for state in states_array:
+#                                     state_2d = state.reshape(1, -1)
+                                    
+#                                     # Get nearest neighbors for this state
+#                                     if hasattr(selector, '_get_region_competence'):
+#                                         competence_region = selector._get_region_competence(state_2d)
+#                                         if len(competence_region) > 0:
+#                                             # Use the competence region to select classifier
+#                                             competences = np.mean(selector.DSEL_processed_[competence_region, :], axis=0)
+#                                             selected_clf = np.argmax(competences)
+#                                         else:
+#                                             # Fallback to first classifier
+#                                             selected_clf = 0
+#                                     else:
+#                                         # Alternative method - use kNN to find similar training examples
+#                                         if hasattr(selector, 'knn_') and hasattr(selector, 'DSEL_processed_'):
+#                                             try:
+#                                                 # Find k nearest neighbors
+#                                                 distances, indices = selector.knn_.kneighbors(state_2d)
+#                                                 indices = indices.flatten()
+                                                
+#                                                 # Calculate competence based on neighbors
+#                                                 if len(indices) > 0:
+#                                                     competences = np.mean(selector.DSEL_processed_[indices, :], axis=0)
+#                                                     selected_clf = np.argmax(competences)
+#                                                 else:
+#                                                     selected_clf = 0
+#                                                     print("error1")
+#                                             except:
+#                                                 selected_clf = 0
+#                                                 print("error2")
+#                                         else:
+#                                             selected_clf = 0
+#                                             print("error3")
+                                    
+#                                     selected_classifiers.append(selected_clf)
+                                
+#                             except Exception as e:
+#                                 print(f"Error in DCS selection, using fallback: {e}")
+#                                 # Fallback: use first classifier for all states
+#                                 selected_classifiers = [0] * len(states_array)
+#                                 print("error4")
+#                         else:
+#                             # Simple fallback - use first classifier
+#                             selected_classifiers = [0] * len(states_array)
+#                             print("error5")
+#                     else:
+#                         # If no predict method, use first classifier
+#                         selected_classifiers = [0] * len(states_array)
+                    
+#                     # Compute HJ values for each state using selected classifiers
+#                     for i, ((ix, iy), state, sel_clf) in enumerate(zip(positions_batch, states_batch, selected_classifiers)):
+#                         try:
+#                             # Ensure selected classifier index is valid
+#                             if sel_clf >= len(ensemble) or sel_clf < 0:
+#                                 sel_clf = 0
+                            
+#                             selected_models[ix, iy] = sel_clf
+#                             hj_values[ix, iy] = ensemble[sel_clf]._compute_hj_value(state)
+#                         except Exception as e:
+#                             print(f"Error computing HJ value, using fallback: {e}")
+#                             selected_models[ix, iy] = 0
+#                             hj_values[ix, iy] = ensemble[0]._compute_hj_value(state)
+                
+#                 except Exception as e:
+#                     print(f"Error in DCS batch processing: {e}")
+#                     # Fallback: use first classifier for all states in batch
+#                     for i, ((ix, iy), state) in enumerate(zip(positions_batch, states_batch)):
+#                         selected_models[ix, iy] = 0
+#                         hj_values[ix, iy] = ensemble[0]._compute_hj_value(state)
+                
+#                 # Clear batch
+#                 states_batch = []
+#                 positions_batch = []
+#     print(selected_models)
+#     return hj_values, selected_models
+
+
+    # """
+    # Simplified version that just uses the DCS selector's predict method
+    # and assumes uniform selection for visualization.
+    # """
+    # xs = np.linspace(x_min, x_max, nx)
+    # ys = np.linspace(y_min, y_max, ny)
+    # hj_values = np.zeros((nx, ny))
+    # selected_models = np.zeros((nx, ny), dtype=int)
+
+    # # Create all states at once
+    # all_states = []
+    # for ix, x in enumerate(xs):
+    #     for iy, y in enumerate(ys):
+    #         all_states.append([x, y, theta])
+    
+    # all_states = np.array(all_states, dtype=np.float32)
+    
+    # try:
+    #     # Get predictions from DCS selector
+    #     predictions = selector.predict(all_states)
+        
+    #     # For visualization, we'll use a simple strategy:
+    #     # Select classifier based on position in grid (for visualization purposes)
+    #     n_classifiers = len(ensemble)
+        
+    #     idx = 0
+    #     for ix, x in enumerate(xs):
+    #         for iy, y in enumerate(ys):
+    #             # Simple strategy: rotate through classifiers based on grid position
+    #             selected_clf = (ix + iy) % n_classifiers
+    #             selected_models[ix, iy] = selected_clf
+                
+    #             # Compute HJ value using selected classifier
+    #             state = [x, y, theta]
+    #             hj_values[ix, iy] = ensemble[selected_clf]._compute_hj_value(state)
+    #             idx += 1
+                
+    # except Exception as e:
+    #     print(f"Error in DCS processing: {e}")
+    #     # Fallback: use first classifier everywhere
+    #     for ix, x in enumerate(xs):
+    #         for iy, y in enumerate(ys):
+    #             selected_models[ix, iy] = 0
+    #             hj_values[ix, iy] = ensemble[0]._compute_hj_value([x, y, theta])
+
+    # return hj_values, selected_models
+    
+def compute_dcs_selector_hj_grid(##maybe works but very slow
     selector,   # an already‐.fit() OLA/LCA/MCB
     ensemble,   # list of HJValueFunctionClassifier
     theta,
@@ -389,50 +556,84 @@ def compute_dcs_selector_hj_grid(
     xs = np.linspace(x_min, x_max, nx)
     ys = np.linspace(y_min, y_max, ny)
 
-    hj_vals = np.zeros((nx, ny))
-    selected_i = np.zeros((nx, ny), dtype=int)
+    hj_vals     = np.zeros((nx, ny))
+    selected_i  = np.zeros((nx, ny), dtype=int)
 
     for i, x in enumerate(xs):
         for j, y in enumerate(ys):
+            # print(i,x,j,y)
             # 1) pack query
             q = np.array([[x, y, theta]], dtype=np.float32)
 
-            try:
-                # 2) region of competence
-                region = selector.get_competence_region(q)
-                region = np.atleast_2d(region).astype(int)
+            # 2) region of competence
+            region = selector.get_competence_region(q)  # maybe shape (1, k) or (k,)
+            region = np.atleast_2d(region).astype(int)  # ensure (1, k) of ints
 
-                # 3) For LCA specifically - need to provide predictions
-                predictions = None
-                if hasattr(selector, '_get_similar_out_profiles'):  # LCA specific
-                    predictions = np.array([clf.predict(q) for clf in ensemble]).T
+            # 3) competence estimates
+            comps = selector.estimate_competence(region)  # shape (1, M)
 
-                # 4) competence estimates
-                if predictions is not None:
-                    comps = selector.estimate_competence(region, predictions=predictions)
-                else:
-                    comps = selector.estimate_competence(region)
+            # 4) attempt to select via the library
+            raw_sel = selector.select(comps)
+            raw_sel = np.array(raw_sel)
 
-                # 5) attempt to select via the library
-                raw_sel = selector.select(comps)
-                raw_sel = np.array(raw_sel)
+            if raw_sel.ndim == 1 and raw_sel.shape[0] == 1:
+                # typical case: array([idx])
+                idx = int(raw_sel[0])
+            else:
+                # fallback: pick highest competence yourself
+                idx = int(np.argmax(comps[0]))
 
-                if raw_sel.ndim == 1 and raw_sel.shape[0] == 1:
-                    idx = int(raw_sel[0])
-                else:
-                    idx = int(np.argmax(comps[0]))
-
-                # 6) store selection + HJ value
-                selected_i[i, j] = idx
-                hj_vals[i, j] = ensemble[idx]._compute_hj_value([x, y, theta])
-
-            except Exception as e:
-                print(f"Error at ({x},{y}) with {type(selector).__name__}: {str(e)}")
-                # Fallback to first classifier
-                selected_i[i, j] = 0
-                hj_vals[i, j] = ensemble[0]._compute_hj_value([x, y, theta])
-
+            # 5) store selection + HJ value
+            selected_i[i, j] = idx
+            hj_vals[i, j]    = ensemble[idx]._compute_hj_value([x, y, theta])
+    print("hj_vals",hj_vals)
+    print("selected_i",selected_i)
     return hj_vals, selected_i
+
+# def compute_dcs_selector_hj_grid(
+#     selector,  # OLA instance (already fitted)
+#     ensemble,
+#     theta,
+#     x_min, x_max, y_min, y_max,
+#     nx=100, ny=100
+# ):
+#     """
+#     Correct implementation using only Xq for competence estimation.
+#     OLA will handle predictions internally.
+#     """
+#     # 1) Build query grid
+#     xs = np.linspace(x_min, x_max, nx)
+#     ys = np.linspace(y_min, y_max, ny)
+#     xx, yy = np.meshgrid(xs, ys)
+#     Xq = np.column_stack((xx.ravel(), yy.ravel(), np.full(nx*ny, theta)))
+    
+#     # Initialize results
+#     hj_grid = np.zeros((ny, nx))
+#     sel_grid = np.zeros((ny, nx), dtype=int)
+
+#     # 2) Process points in batches
+#     batch_size = 1000
+#     for i in range(0, len(Xq), batch_size):
+#         batch = Xq[i:i+batch_size]
+        
+#         # 3) Estimate competences using only Xq
+#         competences = selector.estimate_competence(
+#             competence_region=batch,  # OLA will find neighbors
+#             distances=None,
+#             predictions=None  # Let OLA handle predictions internally
+#         )
+        
+#         # 4) Select best classifier for each point
+#         selected_indices = selector.select(competences)
+        
+#         # 5) Compute HJ values using selected classifiers
+#         for j, clf_idx in enumerate(selected_indices):
+#             idx = i + j
+#             hj_grid.flat[idx] = ensemble[clf_idx]._compute_hj_value(batch[j])
+#             sel_grid.flat[idx] = clf_idx
+
+#     return hj_grid, sel_grid
+
 def plot_hj_ensemble_comparison(
     ensemble,
     des_methods: Dict[str,Any],
@@ -655,7 +856,7 @@ def evaluate_dcs_methods(
         'OLA': OLA(pool_classifiers=ensemble, k=7),
         'LCA': LCA(pool_classifiers=ensemble, k=7),
         'MCB': MCB(pool_classifiers=ensemble, k=7),
-        'RANK': Rank(pool_classifiers=ensemble,k=7)
+        'RANK': RANK(pool_classifiers=ensemble)
     }
     results, fitted = {}, {}
     for name, method in dcs_methods.items():
