@@ -410,59 +410,59 @@ def compute_dcs_selector_hj_grid(
 
     for i, x in enumerate(xs):
         for j, y in enumerate(ys):
-            print(f"\nGrid point ({i},{j}) : x={x}, y={y}, theta={theta}")
+            # print(f"\nGrid point ({i},{j}) : x={x}, y={y}, theta={theta}")
 
             # 1) Pack query
             q = np.array([[x, y, theta]], dtype=np.float32)
-            print("Query q:", q)
+            # print("Query q:", q)
 
             # 2) Region of competence (distances, indices)
             region_tuple = selector.get_competence_region(q)
             distances, indices = region_tuple
-            print("Distances to neighbors:", distances)
-            print("Indices of neighbors:", indices)
+            # print("Distances to neighbors:", distances)
+            # print("Indices of neighbors:", indices)
 
             # Use only the indices for competence estimation
             region_indices = np.atleast_2d(indices).astype(int)
-            print("Region indices (for competence):", region_indices)
-            print("Region indices shape:", region_indices.shape)
+            # print("Region indices (for competence):", region_indices)
+            # print("Region indices shape:", region_indices.shape)
 
             # --- Print neighbor ground truth and classifier predictions ---
             neighbor_indices = region_indices[0]  # shape (k,)
             if X_train is not None and y_train is not None:
                 neighbor_X = X_train[neighbor_indices]
                 neighbor_y = y_train[neighbor_indices]
-                print("Neighbor ground truth labels:", neighbor_y)
+                # print("Neighbor ground truth labels:", neighbor_y)
 
                 for clf_idx, clf in enumerate(ensemble):
                     preds = clf.predict(neighbor_X)
-                    print(f"Classifier {clf_idx} predictions on neighbors: {preds}")
+                    # print(f"Classifier {clf_idx} predictions on neighbors: {preds}")
                     correct = preds == neighbor_y
-                    print(f"Classifier {clf_idx} correct predictions: {correct} ({np.sum(correct)}/{len(correct)})")
+                    # print(f"Classifier {clf_idx} correct predictions: {correct} ({np.sum(correct)}/{len(correct)})")
                     computed_competence = np.mean(correct)
-                    print(f"Classifier {clf_idx} computed competence: {computed_competence:.3f}")
+                    # print(f"Classifier {clf_idx} computed competence: {computed_competence:.3f}")
             else:
-                print("X_train and y_train not provided, skipping neighbor prediction debug.")
+                # print("X_train and y_train not provided, skipping neighbor prediction debug.")
 
             # 3) Competence estimates
-            comps = selector.estimate_competence(region_indices)  # shape (1, n_classifiers)
-            print("Competence estimates (from selector):", comps)
-            print("Competence estimates shape:", comps.shape)
+                comps = selector.estimate_competence(region_indices)  # shape (1, n_classifiers)
+            # print("Competence estimates (from selector):", comps)
+            # print("Competence estimates shape:", comps.shape)
 
             # 4) Select classifier
             raw_sel = selector.select(comps)
-            print("Raw selection output:", raw_sel)
+            # print("Raw selection output:", raw_sel)
             if raw_sel.ndim == 1 and raw_sel.shape[0] == 1:
                 idx = int(raw_sel[0])
             else:
                 idx = int(np.argmax(comps[0]))
-            print("Selected classifier index:", idx)
+            # print("Selected classifier index:", idx)
 
             # 5) Store selection + HJ value
             selected_i[i, j] = idx
             hj_val = ensemble[idx]._compute_hj_value([x, y, theta])
             hj_vals[i, j] = hj_val
-            print(f"HJ value for selected classifier {idx} at ({x},{y},{theta}): {hj_val}")
+            # print(f"HJ value for selected classifier {idx} at ({x},{y},{theta}): {hj_val}")
 
     print("\nFinal HJ values grid (partial):", hj_vals[:5,:5])
     print("Final selected indices grid (partial):", selected_i[:5,:5])
@@ -754,9 +754,9 @@ def evaluate_dcs_methods(
     """Exactly the same as DES, but for DCS methods (OLA, LCA, MCB)."""
     dcs_methods = {
         'OLA': OLA(pool_classifiers=ensemble, k=20),
-        # 'LCA': LCA(pool_classifiers=ensemble, k=7),
-        # 'MCB': MCB(pool_classifiers=ensemble, k=7),
-        # 'RANK': Rank(pool_classifiers=ensemble,k=7)
+        'LCA': LCA(pool_classifiers=ensemble, k=7),
+        'MCB': MCB(pool_classifiers=ensemble, k=7),
+        'RANK': Rank(pool_classifiers=ensemble,k=7)
     }
     results, fitted = {}, {}
     for name, method in tqdm(dcs_methods.items(), desc="Evaluating DCS methods"):
@@ -840,7 +840,7 @@ def main():
     """Main pipeline for training and testing DES with HJ ensemble."""
     # Configuration
     DEVICE = 'cuda'  # Change to 'cuda' if you have GPU
-    N_SAMPLES = 100
+    N_SAMPLES = 500
     TEST_SIZE = 0.1
     SEED = 42
     
@@ -851,7 +851,9 @@ def main():
     
     # Checkpoint configuration
     BASE_CHECKPOINT_PATH = "/storage1/fs1/sibai/Active/ihab/research_new/dino_wm/runs/ddpg_hj_dubins/20250706-164456"
-    CHECKPOINT_EPOCHS = [1, 12, 7, 31, 10]  # Use checkpoints 55-59
+    # CHECKPOINT_EPOCHS = [31, 12, 7 , 10]  # Use checkpoints 55-59
+    CHECKPOINT_EPOCHS = [13, 14, 15 , 16, 1]  # Use checkpoints 55-59
+
     
     # Initialize wandb
     run_name = f"des_hj_ensemble_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
