@@ -431,8 +431,9 @@ def compute_dcs_selector_hj_grid(
                 # Fallback to first classifier
                 selected_i[i, j] = 0
                 hj_vals[i, j] = ensemble[0]._compute_hj_value([x, y, theta])
-
+    print(selected_i)
     return hj_vals, selected_i
+
 def plot_hj_ensemble_comparison(
     ensemble,
     des_methods: Dict[str,Any],
@@ -653,9 +654,9 @@ def evaluate_dcs_methods(
     """Exactly the same as DES, but for DCS methods (OLA, LCA, MCB)."""
     dcs_methods = {
         'OLA': OLA(pool_classifiers=ensemble, k=7),
-        'LCA': LCA(pool_classifiers=ensemble, k=7),
-        'MCB': MCB(pool_classifiers=ensemble, k=7),
-        'RANK': Rank(pool_classifiers=ensemble,k=7)
+        # 'LCA': LCA(pool_classifiers=ensemble, k=7),
+        # 'MCB': MCB(pool_classifiers=ensemble, k=7),
+    #     'RANK': Rank(pool_classifiers=ensemble,k=7)
     }
     results, fitted = {}, {}
     for name, method in dcs_methods.items():
@@ -738,7 +739,7 @@ def plot_results(results: Dict[str, Any], X_test: np.ndarray, y_test: np.ndarray
 def main():
     """Main pipeline for training and testing DES with HJ ensemble."""
     # Configuration
-    DEVICE = 'cpu'  # Change to 'cuda' if you have GPU
+    DEVICE = 'cuda'  # Change to 'cuda' if you have GPU
     N_SAMPLES = 10000
     TEST_SIZE = 0.3
     SEED = 42
@@ -746,7 +747,7 @@ def main():
     # Grid parameters for HJ plotting
     X_MIN, X_MAX = -3.0, 3.0
     Y_MIN, Y_MAX = -3.0, 3.0
-    NX, NY = 30, 30
+    NX, NY = 10, 10
     
     # Checkpoint configuration
     BASE_CHECKPOINT_PATH = "/storage1/fs1/sibai/Active/ihab/research_new/dino_wm/runs/ddpg_hj_dubins/20250706-164456"
