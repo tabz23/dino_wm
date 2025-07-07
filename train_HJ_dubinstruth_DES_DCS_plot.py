@@ -381,67 +381,104 @@ def compute_des_ensemble_hj_grid(des_method, ensemble, theta, x_min=-3.0, x_max=
     return hj_values, selected_models
 
 
-def compute_dcs_selector_hj_grid(##maybe works but very slow
-    selector,   # an already‐.fit() OLA/LCA/MCB
+import numpy as np
+import os
+
+import numpy as np
+import os
+
+import numpy as np
+import os
+
+import numpy as np
+import os
+
+def compute_dcs_selector_hj_grid(
+    selector,   # already fit OLA/LCA/MCB
     ensemble,   # list of HJValueFunctionClassifier
     theta,
     x_min, x_max, y_min, y_max,
-    nx=100, ny=100
+    nx=100, ny=100,
+    X_train=None,  # Add these parameters!
+    y_train=None
 ):
     xs = np.linspace(x_min, x_max, nx)
     ys = np.linspace(y_min, y_max, ny)
 
-    hj_vals     = np.zeros((nx, ny))
-    selected_i  = np.zeros((nx, ny), dtype=int)
+    hj_vals    = np.zeros((nx, ny))
+    selected_i = np.zeros((nx, ny), dtype=int)
 
     for i, x in enumerate(xs):
         for j, y in enumerate(ys):
-            # print(i,x,j,y)
-            # 1) pack query
+            print(f"\nGrid point ({i},{j}) : x={x}, y={y}, theta={theta}")
+
+            # 1) Pack query
             q = np.array([[x, y, theta]], dtype=np.float32)
+            print("Query q:", q)
 
-            # 2) region of competence
-            region = selector.get_competence_region(q)  # maybe shape (1, k) or (k,)
-            region = np.atleast_2d(region).astype(int)  # ensure (1, k) of ints
+            # 2) Region of competence (distances, indices)
+            region_tuple = selector.get_competence_region(q)
+            distances, indices = region_tuple
+            print("Distances to neighbors:", distances)
+            print("Indices of neighbors:", indices)
 
-            # 3) competence estimates
-            comps = selector.estimate_competence(region)  # shape (1, M)
+            # Use only the indices for competence estimation
+            region_indices = np.atleast_2d(indices).astype(int)
+            print("Region indices (for competence):", region_indices)
+            print("Region indices shape:", region_indices.shape)
 
-            # 4) attempt to select via the library
+            # --- Print neighbor ground truth and classifier predictions ---
+            neighbor_indices = region_indices[0]  # shape (k,)
+            if X_train is not None and y_train is not None:
+                neighbor_X = X_train[neighbor_indices]
+                neighbor_y = y_train[neighbor_indices]
+                print("Neighbor ground truth labels:", neighbor_y)
+
+                for clf_idx, clf in enumerate(ensemble):
+                    preds = clf.predict(neighbor_X)
+                    print(f"Classifier {clf_idx} predictions on neighbors: {preds}")
+                    correct = preds == neighbor_y
+                    print(f"Classifier {clf_idx} correct predictions: {correct} ({np.sum(correct)}/{len(correct)})")
+                    computed_competence = np.mean(correct)
+                    print(f"Classifier {clf_idx} computed competence: {computed_competence:.3f}")
+            else:
+                print("X_train and y_train not provided, skipping neighbor prediction debug.")
+
+            # 3) Competence estimates
+            comps = selector.estimate_competence(region_indices)  # shape (1, n_classifiers)
+            print("Competence estimates (from selector):", comps)
+            print("Competence estimates shape:", comps.shape)
+
+            # 4) Select classifier
             raw_sel = selector.select(comps)
-            raw_sel = np.array(raw_sel)
-
+            print("Raw selection output:", raw_sel)
             if raw_sel.ndim == 1 and raw_sel.shape[0] == 1:
-                # typical case: array([idx])
                 idx = int(raw_sel[0])
             else:
-                # fallback: pick highest competence yourself
                 idx = int(np.argmax(comps[0]))
+            print("Selected classifier index:", idx)
 
-            # 5) store selection + HJ value
+            # 5) Store selection + HJ value
             selected_i[i, j] = idx
-            hj_vals[i, j]    = ensemble[idx]._compute_hj_value([x, y, theta])
-    print("hj_vals",hj_vals)
-    print("selected_i",selected_i)
+            hj_val = ensemble[idx]._compute_hj_value([x, y, theta])
+            hj_vals[i, j] = hj_val
+            print(f"HJ value for selected classifier {idx} at ({x},{y},{theta}): {hj_val}")
 
+    print("\nFinal HJ values grid (partial):", hj_vals[:5,:5])
+    print("Final selected indices grid (partial):", selected_i[:5,:5])
 
-    # Define the save directory
+    # Save results
     save_dir = "/storage1/fs1/sibai/Active/ihab/research_new/dino_wm/selected_members"
     os.makedirs(save_dir, exist_ok=True)
-
-    # Save hj_vals and selected_i
-    hj_vals_path = os.path.join(save_dir, "hj_vals.npy")
-    selected_i_path = os.path.join(save_dir, "selected_i.npy")
-
+    np.save(os.path.join(save_dir, "hj_vals.npy"), hj_vals)
+    np.save(os.path.join(save_dir, "selected_i.npy"), selected_i)
     np.savetxt(os.path.join(save_dir, "hj_vals.txt"), hj_vals, fmt="%.5f")
     np.savetxt(os.path.join(save_dir, "selected_i.txt"), selected_i, fmt="%d")
 
-
-    print(f"Saved HJ values to {hj_vals_path}")
-    print(f"Saved selected indices to {selected_i_path}")
+    print(f"Saved HJ values to {os.path.join(save_dir, 'hj_vals.npy')}")
+    print(f"Saved selected indices to {os.path.join(save_dir, 'selected_i.npy')}")
 
     return hj_vals, selected_i
-
 
 def plot_hj_ensemble_comparison(
     ensemble,
@@ -451,11 +488,13 @@ def plot_hj_ensemble_comparison(
     checkpoint_epochs,
     x_min=-3., x_max=3., y_min=-3., y_max=3., nx=100, ny=100
 ):
-    """Plot HJ values for individual ensemble members and DES methods."""
+    """
+    Plot HJ values for individual ensemble members and DES/DCS methods,
+    both as continuous and binary (thresholded at 0), along with ground truth BRS.
+    """
     hazards = [np.array([0.4, -1.2]), np.array([-0.4, 1.2])]
     hazard_size = 0.8
-    # thetas = [0.0, np.pi/4, np.pi/2, 3*np.pi/4]
-    thetas = [0.0]
+    thetas = [0.0]  # You can add more if needed
     
     # Load all ensemble members
     print("Loading ensemble members for plotting...")
@@ -476,103 +515,156 @@ def plot_hj_ensemble_comparison(
         working_methods = [(name, method) for name, method in des_methods.items() 
                           if method is not None and hasattr(method, 'estimate_competence')]
         
-        # Create figure with subplots
-        n_methods = len(working_methods)
+        # Get working DCS methods
+        working_dcs_methods = [(name, method) for name, method in dcs_methods.items() 
+                          if method is not None and hasattr(method, 'estimate_competence')]
+        
+        # Layout: for each model/method, plot continuous and binary HJ
         n_individual = len(ensemble)
-        n_cols = 4  # Individual models, top 3 DES methods, ground truth
-        n_rows = max(2, (n_individual + n_methods + 2) // n_cols + 1)
+        n_des = len(working_methods)
+        n_dcs = len(working_dcs_methods)
+        n_cols = 4  # You can adjust this if you want
+        # Each model/method gets 2 plots (continuous + binary)
+        n_plots = 2 * (n_individual + n_des + n_dcs) + 1  # +1 for ground truth BRS
+        n_rows = (n_plots + n_cols - 1) // n_cols
         
-        fig, axes = plt.subplots(n_rows, n_cols, figsize=(16, 4*n_rows))
+        fig, axes = plt.subplots(n_rows, n_cols, figsize=(5*n_cols, 4*n_rows))
         axes = axes.flatten()
-        
         plot_idx = 0
         
-        # Plot individual ensemble members
+        # Plot individual ensemble members (continuous and binary)
         for i, hj_vals in enumerate(individual_hj_values):
+            # Continuous
             if plot_idx < len(axes):
                 im = axes[plot_idx].imshow(
                     hj_vals.T, extent=(x_min, x_max, y_min, y_max), 
                     origin="lower", cmap='RdYlBu_r'
                 )
-                axes[plot_idx].set_title(f'Individual Model {i+1}\n(Epoch {checkpoint_epochs[i]})')
+                axes[plot_idx].set_title(f'Continuous HJ\nModel {i+1} (Epoch {checkpoint_epochs[i]})')
                 axes[plot_idx].set_xlabel('x')
                 axes[plot_idx].set_ylabel('y')
-                
-                # Add hazards and goal
                 for hazard_pos in hazards:
                     circle = plt.Circle(hazard_pos, hazard_size, fill=False, color='red', linewidth=2)
                     axes[plot_idx].add_patch(circle)
                 goal_circle = plt.Circle([2.2, 2.2], 0.3, fill=False, color='green', linewidth=2)
                 axes[plot_idx].add_patch(goal_circle)
-                
                 plt.colorbar(im, ax=axes[plot_idx], fraction=0.046, pad=0.04)
                 plot_idx += 1
-        
-        # Plot top DES methods
-        for i, (method_name, method) in enumerate(working_methods[:]):  # Top 3 methods
+            # Binary
             if plot_idx < len(axes):
-                print(f"Computing DES ensemble HJ for {method_name}")
-                try:
-                    des_hj_vals, selected_models = compute_des_ensemble_hj_grid(
-                        method, ensemble, theta, x_min, x_max, y_min, y_max, nx, ny
-                    )
-                    
+                hj_binary = (hj_vals >= 0).astype(int)
+                im_bin = axes[plot_idx].imshow(
+                    hj_binary.T, extent=(x_min, x_max, y_min, y_max), 
+                    origin="lower", cmap='Blues'
+                )
+                axes[plot_idx].set_title(f'Binary HJ\nModel {i+1} (Epoch {checkpoint_epochs[i]})')
+                axes[plot_idx].set_xlabel('x')
+                axes[plot_idx].set_ylabel('y')
+                for hazard_pos in hazards:
+                    circle = plt.Circle(hazard_pos, hazard_size, fill=False, color='red', linewidth=2)
+                    axes[plot_idx].add_patch(circle)
+                goal_circle = plt.Circle([2.2, 2.2], 0.3, fill=False, color='green', linewidth=2)
+                axes[plot_idx].add_patch(goal_circle)
+                plt.colorbar(im_bin, ax=axes[plot_idx], fraction=0.046, pad=0.04)
+                plot_idx += 1
+        
+        # Plot DES methods (continuous and binary)
+        for method_name, method in working_methods:
+            print(f"Computing DES ensemble HJ for {method_name}")
+            try:
+                des_hj_vals, selected_models = compute_des_ensemble_hj_grid(
+                    method, ensemble, theta, x_min, x_max, y_min, y_max, nx, ny
+                )
+                # Continuous
+                if plot_idx < len(axes):
                     im = axes[plot_idx].imshow(
                         des_hj_vals.T, extent=(x_min, x_max, y_min, y_max), 
                         origin="lower", cmap='RdYlBu_r'
                     )
-                    axes[plot_idx].set_title(f'DES: {method_name}')
+                    axes[plot_idx].set_title(f'Continuous HJ\nDES: {method_name}')
                     axes[plot_idx].set_xlabel('x')
                     axes[plot_idx].set_ylabel('y')
-                    
-                    # Add hazards and goal
                     for hazard_pos in hazards:
                         circle = plt.Circle(hazard_pos, hazard_size, fill=False, color='red', linewidth=2)
                         axes[plot_idx].add_patch(circle)
                     goal_circle = plt.Circle([2.2, 2.2], 0.3, fill=False, color='green', linewidth=2)
                     axes[plot_idx].add_patch(goal_circle)
-                    
                     plt.colorbar(im, ax=axes[plot_idx], fraction=0.046, pad=0.04)
                     plot_idx += 1
-                    
-                except Exception as e:
-                    print(f"Error plotting {method_name}: {e}")
-        # ---- now plot DCS methods in the next columns ----
-        for name, method in list(dcs_methods.items()):
-            if plot_idx < len(axes):
-                print(f"Computing DCS HJ for {name}")
-                hj_vals, sel_models = compute_dcs_selector_hj_grid(
+                # Binary
+                if plot_idx < len(axes):
+                    des_hj_binary = (des_hj_vals >= 0).astype(int)
+                    im_bin = axes[plot_idx].imshow(
+                        des_hj_binary.T, extent=(x_min, x_max, y_min, y_max), 
+                        origin="lower", cmap='Blues'
+                    )
+                    axes[plot_idx].set_title(f'Binary HJ\nDES: {method_name}')
+                    axes[plot_idx].set_xlabel('x')
+                    axes[plot_idx].set_ylabel('y')
+                    for hazard_pos in hazards:
+                        circle = plt.Circle(hazard_pos, hazard_size, fill=False, color='red', linewidth=2)
+                        axes[plot_idx].add_patch(circle)
+                    goal_circle = plt.Circle([2.2, 2.2], 0.3, fill=False, color='green', linewidth=2)
+                    axes[plot_idx].add_patch(goal_circle)
+                    plt.colorbar(im_bin, ax=axes[plot_idx], fraction=0.046, pad=0.04)
+                    plot_idx += 1
+            except Exception as e:
+                print(f"Error plotting {method_name}: {e}")
+        
+        # Plot DCS methods (continuous and binary)
+        for method_name, method in working_dcs_methods:
+            print(f"Computing DCS HJ for {method_name}")
+            try:
+                dcs_hj_vals, sel_models = compute_dcs_selector_hj_grid(
                     method, ensemble, theta,
                     x_min, x_max, y_min, y_max, nx, ny
                 )
-                im = axes[plot_idx].imshow(
-                    hj_vals.T, extent=(x_min, x_max, y_min, y_max),
-                    origin='lower', cmap='RdYlBu_r'
-                )
-                axes[plot_idx].set_title(f'DCS: {name}')
-                axes[plot_idx].set_xlabel('x'); axes[plot_idx].set_ylabel('y')
-                for hz in hazards:
-                    axes[plot_idx].add_patch(plt.Circle(hz, hazard_size, fill=False, color='red'))
-                axes[plot_idx].add_patch(plt.Circle([2.2,2.2],0.3,fill=False,color='green'))
-                plt.colorbar(im, ax=axes[plot_idx], fraction=0.046,pad=0.04)
-                plot_idx += 1
-        # Plot ground truth BRS
+                # Continuous
+                if plot_idx < len(axes):
+                    im = axes[plot_idx].imshow(
+                        dcs_hj_vals.T, extent=(x_min, x_max, y_min, y_max),
+                        origin='lower', cmap='RdYlBu_r'
+                    )
+                    axes[plot_idx].set_title(f'Continuous HJ\nDCS: {method_name}')
+                    axes[plot_idx].set_xlabel('x')
+                    axes[plot_idx].set_ylabel('y')
+                    for hz in hazards:
+                        axes[plot_idx].add_patch(plt.Circle(hz, hazard_size, fill=False, color='red'))
+                    axes[plot_idx].add_patch(plt.Circle([2.2,2.2],0.3,fill=False,color='green'))
+                    plt.colorbar(im, ax=axes[plot_idx], fraction=0.046,pad=0.04)
+                    plot_idx += 1
+                # Binary
+                if plot_idx < len(axes):
+                    dcs_hj_binary = (dcs_hj_vals >= 0).astype(int)
+                    im_bin = axes[plot_idx].imshow(
+                        dcs_hj_binary.T, extent=(x_min, x_max, y_min, y_max),
+                        origin='lower', cmap='Blues'
+                    )
+                    axes[plot_idx].set_title(f'Binary HJ\nDCS: {method_name}')
+                    axes[plot_idx].set_xlabel('x')
+                    axes[plot_idx].set_ylabel('y')
+                    for hz in hazards:
+                        axes[plot_idx].add_patch(plt.Circle(hz, hazard_size, fill=False, color='red'))
+                    axes[plot_idx].add_patch(plt.Circle([2.2,2.2],0.3,fill=False,color='green'))
+                    plt.colorbar(im_bin, ax=axes[plot_idx], fraction=0.046,pad=0.04)
+                    plot_idx += 1
+            except Exception as e:
+                print(f"Error plotting {method_name}: {e}")
+        
+        # Plot ground truth BRS (binary only)
         if plot_idx < len(axes) and theta in brs_data:
             axes[plot_idx].imshow(
                 brs_data[theta].T, extent=(x_min, x_max, y_min, y_max), 
-                origin="lower", cmap='RdYlBu'
+                origin="lower", cmap='Blues'
             )
-            axes[plot_idx].set_title(f'Ground Truth BRS')
+            axes[plot_idx].set_title(f'Ground Truth BRS (Binary)')
             axes[plot_idx].set_xlabel('x')
             axes[plot_idx].set_ylabel('y')
-            
-            # Add hazards and goal
             for hazard_pos in hazards:
                 circle = plt.Circle(hazard_pos, hazard_size, fill=False, color='red', linewidth=2)
                 axes[plot_idx].add_patch(circle)
             goal_circle = plt.Circle([2.2, 2.2], 0.3, fill=False, color='green', linewidth=2)
             axes[plot_idx].add_patch(goal_circle)
-            
             plot_idx += 1
         
         # Hide unused subplots
@@ -586,7 +678,6 @@ def plot_hj_ensemble_comparison(
         # Log to wandb
         wandb.log({f"hj_comparison/theta_{theta:.2f}": wandb.Image(fig)})
         plt.close(fig)
-
 
 def evaluate_des_methods(
     X_train: np.ndarray, y_train: np.ndarray,
@@ -749,18 +840,18 @@ def main():
     """Main pipeline for training and testing DES with HJ ensemble."""
     # Configuration
     DEVICE = 'cuda'  # Change to 'cuda' if you have GPU
-    N_SAMPLES = 10000
+    N_SAMPLES = 100
     TEST_SIZE = 0.1
     SEED = 42
     
     # Grid parameters for HJ plotting
     X_MIN, X_MAX = -3.0, 3.0
     Y_MIN, Y_MAX = -3.0, 3.0
-    NX, NY = 30,30
+    NX, NY = 40,40
     
     # Checkpoint configuration
     BASE_CHECKPOINT_PATH = "/storage1/fs1/sibai/Active/ihab/research_new/dino_wm/runs/ddpg_hj_dubins/20250706-164456"
-    CHECKPOINT_EPOCHS = [1, 2, 59, 3, 32]  # Use checkpoints 55-59
+    CHECKPOINT_EPOCHS = [1, 12, 7, 31, 10]  # Use checkpoints 55-59
     
     # Initialize wandb
     run_name = f"des_hj_ensemble_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
