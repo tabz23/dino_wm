@@ -30,6 +30,7 @@ from deslib.dcs.ola     import OLA
 from deslib.dcs.lca     import LCA
 from deslib.dcs.mcb     import MCB
 from deslib.dcs.rank    import Rank
+from deslib.dcs.a_posteriori import APosteriori
 
 # For loading your HJ policies
 from PyHJ.data import Collector, VectorReplayBuffer, Batch
@@ -379,7 +380,8 @@ def compute_des_ensemble_hj_grid(des_method, ensemble, theta, x_min=-3.0, x_max=
     
     return hj_values, selected_models
 
-def compute_dcs_selector_hj_grid(
+
+def compute_dcs_selector_hj_grid(##maybe works but very slow
     selector,   # an already‐.fit() OLA/LCA/MCB
     ensemble,   # list of HJValueFunctionClassifier
     theta,
@@ -389,50 +391,57 @@ def compute_dcs_selector_hj_grid(
     xs = np.linspace(x_min, x_max, nx)
     ys = np.linspace(y_min, y_max, ny)
 
-    hj_vals = np.zeros((nx, ny))
-    selected_i = np.zeros((nx, ny), dtype=int)
+    hj_vals     = np.zeros((nx, ny))
+    selected_i  = np.zeros((nx, ny), dtype=int)
 
     for i, x in enumerate(xs):
         for j, y in enumerate(ys):
+            # print(i,x,j,y)
             # 1) pack query
             q = np.array([[x, y, theta]], dtype=np.float32)
 
-            try:
-                # 2) region of competence
-                region = selector.get_competence_region(q)
-                region = np.atleast_2d(region).astype(int)
+            # 2) region of competence
+            region = selector.get_competence_region(q)  # maybe shape (1, k) or (k,)
+            region = np.atleast_2d(region).astype(int)  # ensure (1, k) of ints
 
-                # 3) For LCA specifically - need to provide predictions
-                predictions = None
-                if hasattr(selector, '_get_similar_out_profiles'):  # LCA specific
-                    predictions = np.array([clf.predict(q) for clf in ensemble]).T
+            # 3) competence estimates
+            comps = selector.estimate_competence(region)  # shape (1, M)
 
-                # 4) competence estimates
-                if predictions is not None:
-                    comps = selector.estimate_competence(region, predictions=predictions)
-                else:
-                    comps = selector.estimate_competence(region)
+            # 4) attempt to select via the library
+            raw_sel = selector.select(comps)
+            raw_sel = np.array(raw_sel)
 
-                # 5) attempt to select via the library
-                raw_sel = selector.select(comps)
-                raw_sel = np.array(raw_sel)
+            if raw_sel.ndim == 1 and raw_sel.shape[0] == 1:
+                # typical case: array([idx])
+                idx = int(raw_sel[0])
+            else:
+                # fallback: pick highest competence yourself
+                idx = int(np.argmax(comps[0]))
 
-                if raw_sel.ndim == 1 and raw_sel.shape[0] == 1:
-                    idx = int(raw_sel[0])
-                else:
-                    idx = int(np.argmax(comps[0]))
+            # 5) store selection + HJ value
+            selected_i[i, j] = idx
+            hj_vals[i, j]    = ensemble[idx]._compute_hj_value([x, y, theta])
+    print("hj_vals",hj_vals)
+    print("selected_i",selected_i)
 
-                # 6) store selection + HJ value
-                selected_i[i, j] = idx
-                hj_vals[i, j] = ensemble[idx]._compute_hj_value([x, y, theta])
 
-            except Exception as e:
-                print(f"Error at ({x},{y}) with {type(selector).__name__}: {str(e)}")
-                # Fallback to first classifier
-                selected_i[i, j] = 0
-                hj_vals[i, j] = ensemble[0]._compute_hj_value([x, y, theta])
-    print(selected_i)
+    # Define the save directory
+    save_dir = "/storage1/fs1/sibai/Active/ihab/research_new/dino_wm/selected_members"
+    os.makedirs(save_dir, exist_ok=True)
+
+    # Save hj_vals and selected_i
+    hj_vals_path = os.path.join(save_dir, "hj_vals.npy")
+    selected_i_path = os.path.join(save_dir, "selected_i.npy")
+
+    np.savetxt(os.path.join(save_dir, "hj_vals.txt"), hj_vals, fmt="%.5f")
+    np.savetxt(os.path.join(save_dir, "selected_i.txt"), selected_i, fmt="%d")
+
+
+    print(f"Saved HJ values to {hj_vals_path}")
+    print(f"Saved selected indices to {selected_i_path}")
+
     return hj_vals, selected_i
+
 
 def plot_hj_ensemble_comparison(
     ensemble,
@@ -645,7 +654,7 @@ def evaluate_des_methods(
             }
     
     return results, fitted_methods
-
+from tqdm import tqdm
 def evaluate_dcs_methods(
     X_train: np.ndarray, y_train: np.ndarray,
     X_test: np.ndarray, y_test: np.ndarray,
@@ -653,13 +662,13 @@ def evaluate_dcs_methods(
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """Exactly the same as DES, but for DCS methods (OLA, LCA, MCB)."""
     dcs_methods = {
-        'OLA': OLA(pool_classifiers=ensemble, k=7),
+        'OLA': OLA(pool_classifiers=ensemble, k=20),
         # 'LCA': LCA(pool_classifiers=ensemble, k=7),
         # 'MCB': MCB(pool_classifiers=ensemble, k=7),
-    #     'RANK': Rank(pool_classifiers=ensemble,k=7)
+        # 'RANK': Rank(pool_classifiers=ensemble,k=7)
     }
     results, fitted = {}, {}
-    for name, method in dcs_methods.items():
+    for name, method in tqdm(dcs_methods.items(), desc="Evaluating DCS methods"):
         print(f"\nEvaluating DCS {name}...")
         try:
             method.fit(X_train, y_train)
@@ -741,17 +750,17 @@ def main():
     # Configuration
     DEVICE = 'cuda'  # Change to 'cuda' if you have GPU
     N_SAMPLES = 10000
-    TEST_SIZE = 0.3
+    TEST_SIZE = 0.1
     SEED = 42
     
     # Grid parameters for HJ plotting
     X_MIN, X_MAX = -3.0, 3.0
     Y_MIN, Y_MAX = -3.0, 3.0
-    NX, NY = 10, 10
+    NX, NY = 30,30
     
     # Checkpoint configuration
     BASE_CHECKPOINT_PATH = "/storage1/fs1/sibai/Active/ihab/research_new/dino_wm/runs/ddpg_hj_dubins/20250706-164456"
-    CHECKPOINT_EPOCHS = [1, 2, 34, 3, 59]  # Use checkpoints 55-59
+    CHECKPOINT_EPOCHS = [1, 2, 59, 3, 32]  # Use checkpoints 55-59
     
     # Initialize wandb
     run_name = f"des_hj_ensemble_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
@@ -799,7 +808,7 @@ def main():
     # 6b. Log DCS results
     wandb.log({f"dcs_accuracy/{k}": v['accuracy'] 
                for k,v in results_dcs.items() if v['predictions'] is not None})
-    
+    print("now plotting basic results")
     # 7. Plot basic results
     plot_results(results_des, X_test, y_test)
     plot_results(results_dcs, X_test, y_test)
@@ -809,6 +818,7 @@ def main():
     hazard_size = 0.8
     brs_data = compute_ground_truth_brs(hazards, hazard_size, X_MIN, X_MAX, Y_MIN, Y_MAX, NX, NY)
 
+    print("now plotting HJ comparisons")
     # 9. Plot HJ comparisons
     plot_hj_ensemble_comparison(
     ensemble=ensemble,
