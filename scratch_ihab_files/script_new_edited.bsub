@@ -2,8 +2,8 @@
 #BSUB -n 12
 #BSUB -q general
 #BSUB -G compute-sibai 
-#BSUB -R 'rusage[mem=302GB]'
-#BSUB -M 300GB
+#BSUB -R 'rusage[mem=202GB]'
+#BSUB -M 200GB
 #BSUB -R 'gpuhost'
 #BSUB -gpu "num=1:gmodel=NVIDIAA40"
 #BSUB -a 'docker(continuumio/anaconda3:2021.11)'
@@ -12,6 +12,7 @@
 #BSUB -oo /storage1/fs1/sibai/Active/ihab/research_new/dino_wm/scratch_ihab_files/logs_new/output%J.log
 #BSUB -eo /storage1/fs1/sibai/Active/ihab/research_new/dino_wm/scratch_ihab_files/logs_new/error%J.log
 #BSUB -env "LSF_DOCKER_VOLUMES=/storage1/fs1/sibai/Active:/storage1/fs1/sibai/Active,LSF_DOCKER_SHM_SIZE=64g"
+
 
 
 # Environment variables for your run
@@ -33,23 +34,27 @@ cd /storage1/fs1/sibai/Active/ihab/research_new/dino_wm
 # Launch training
 # #TeslaV100_SXM2_32GB  NVIDIAA40 NVIDIAA100_SXM4_40GB
 
+
+
+#CARGOAL
+python -m accelerate.commands.launch train.py --config-name "train copy.yaml" env=maniskill frameskip=5 num_hist=3 encoder=dino decoder=vqvae proprio_emb_dim=100 training.batch_size=24 ##USE PYTHON MESH ACCELERATE
+
 # python -m accelerate.commands.launch train.py --config-name "train copy.yaml" env=cargoal frameskip=5 num_hist=3 encoder=dino_cls decoder=transposed_conv proprio_emb_dim=50 training.batch_size=64
 # python -m accelerate.commands.launch train.py --config-name "train copy.yaml" env=cargoal frameskip=5 num_hist=3 encoder=vc1 decoder=transposed_conv proprio_emb_dim=50 training.batch_size=64
 # python -m accelerate.commands.launch train.py --config-name "train copy.yaml" env=cargoal frameskip=5 num_hist=3 encoder=resnet decoder=transposed_conv proprio_emb_dim=50 training.batch_size=64
-python -m accelerate.commands.launch train.py --config-name "train copy.yaml" env=cargoal frameskip=5 num_hist=3 encoder=scratch model.train_encoder=true decoder=transposed_conv proprio_emb_dim=50 training.batch_size=64
-python -m accelerate.commands.launch train.py --config-name "train copy.yaml" env=cargoal frameskip=5 num_hist=3 encoder=r3m decoder=transposed_conv proprio_emb_dim=50 training.batch_size=64
-python -m accelerate.commands.launch train.py --config-name "train copy.yaml" env=cargoal frameskip=5 num_hist=3 encoder=dino decoder=vqvae proprio_emb_dim=50 training.batch_size=64 ##USE PYTHON MESH ACCELERATE
+# python -m accelerate.commands.launch train.py --config-name "train copy.yaml" env=cargoal frameskip=5 num_hist=3 encoder=scratch model.train_encoder=true decoder=transposed_conv proprio_emb_dim=50 training.batch_size=64
+# python -m accelerate.commands.launch train.py --config-name "train copy.yaml" env=cargoal frameskip=5 num_hist=3 encoder=r3m decoder=transposed_conv proprio_emb_dim=50 training.batch_size=64
+python -m accelerate.commands.launch train.py --config-name "train copy.yaml" env=cargoal frameskip=5 num_hist=3 encoder=dino decoder=vqvae proprio_emb_dim=50 training.batch_size=24 proprio_encoder##USE PYTHON MESH ACCELERATE
 
 
-
-python -m accelerate.commands.launch train.py --config-name "train copy.yaml" env=maniskill frameskip=5 num_hist=3 encoder=dino_cls decoder=transposed_conv proprio_emb_dim=100
-python -m accelerate.commands.launch train.py --config-name "train copy.yaml" env=maniskill frameskip=5 num_hist=3 encoder=vc1 decoder=transposed_conv proprio_emb_dim=100
-python -m accelerate.commands.launch train.py --config-name "train copy.yaml" env=maniskill frameskip=5 num_hist=3 encoder=resnet decoder=transposed_conv proprio_emb_dim=100
-python -m accelerate.commands.launch train.py --config-name "train copy.yaml" env=maniskill frameskip=5 num_hist=3 encoder=scratch model.train_encoder=true decoder=transposed_conv proprio_emb_dim=100
-python -m accelerate.commands.launch train.py --config-name "train copy.yaml" env=maniskill frameskip=5 num_hist=3 encoder=r3m decoder=transposed_conv proprio_emb_dim=100
-python -m accelerate.commands.launch train.py --config-name "train copy.yaml" env=maniskill frameskip=5 num_hist=3 encoder=dino decoder=vqvae proprio_emb_dim=100 ##USE PYTHON MESH ACCELERATE
-
-
+## MANI might need to re-run maniskill with larger action embed dimension
+# python -m accelerate.commands.launch train.py --config-name "train copy.yaml" env=maniskill frameskip=5 num_hist=3 encoder=dino_cls decoder=transposed_conv proprio_emb_dim=100
+# python -m accelerate.commands.launch train.py --config-name "train copy.yaml" env=maniskill frameskip=5 num_hist=3 encoder=vc1 decoder=transposed_conv proprio_emb_dim=100
+# python -m accelerate.commands.launch train.py --config-name "train copy.yaml" env=maniskill frameskip=5 num_hist=3 encoder=resnet decoder=transposed_conv proprio_emb_dim=100
+# python -m accelerate.commands.launch train.py --config-name "train copy.yaml" env=maniskill frameskip=5 num_hist=3 encoder=scratch model.train_encoder=true decoder=transposed_conv proprio_emb_dim=100
+# python -m accelerate.commands.launch train.py --config-name "train copy.yaml" env=maniskill frameskip=5 num_hist=3 encoder=r3m decoder=transposed_conv proprio_emb_dim=100
+# python -m accelerate.commands.launch train.py --config-name "train copy.yaml" env=maniskill frameskip=5 num_hist=3 encoder=dino decoder=vqvae proprio_emb_dim=100 ##USE PYTHON MESH ACCELERATE
+# python -m accelerate.commands.launch train.py --config-name "train copy.yaml" env=maniskill frameskip=5 num_hist=3 encoder=dino decoder=vqvae proprio_emb_dim=100 training.batch_size=24 ##USE PYTHON MESH ACCELERATE
 
 
 
@@ -59,4 +64,44 @@ python -m accelerate.commands.launch train.py --config-name "train copy.yaml" en
 # python /storage1/fs1/sibai/Active/ihab/research_new/dino_wm/train_HJ_dubinslatent.py --dino_encoder scratch  --seed 6 --gamma-pyhj 0.99
 # python /storage1/fs1/sibai/Active/ihab/research_new/dino_wm/train_HJ_dubinslatent.py --dino_encoder r3m  --seed 6 --gamma-pyhj 0.99
 # python /storage1/fs1/sibai/Active/ihab/research_new/dino_wm/train_HJ_dubinslatent.py --dino_encoder dino  --seed 6 --gamma-pyhj 0.99
+
+
+
+
+#CARGOAL
+python -m accelerate.commands.launch train.py --config-name "train copy.yaml" env=cargoal frameskip=5 num_hist=3 encoder=dino_cls decoder=transposed_conv proprio_emb_dim=40 training.batch_size=32 training.epochs=1 training.proprio_encoder=dummy
+python -m accelerate.commands.launch train.py --config-name "train copy.yaml" env=cargoal frameskip=5 num_hist=3 encoder=vc1 decoder=transposed_conv proprio_emb_dim=40 training.batch_size=32 training.epochs=1 training.proprio_encoder=dummy
+python -m accelerate.commands.launch train.py --config-name "train copy.yaml" env=cargoal frameskip=5 num_hist=3 encoder=resnet decoder=transposed_conv proprio_emb_dim=40 training.batch_size=32 training.epochs=1 training.proprio_encoder=dummy
+python -m accelerate.commands.launch train.py --config-name "train copy.yaml" env=cargoal frameskip=5 num_hist=3 encoder=scratch model.train_encoder=true decoder=transposed_conv proprio_emb_dim=40 training.batch_size=32 training.epochs=1 training.proprio_encoder=dummy
+python -m accelerate.commands.launch train.py --config-name "train copy.yaml" env=cargoal frameskip=5 num_hist=3 encoder=r3m decoder=transposed_conv proprio_emb_dim=40 training.batch_size=32 training.epochs=1 training.proprio_encoder=dummy
+python -m accelerate.commands.launch train.py --config-name "train copy.yaml" env=cargoal frameskip=5 num_hist=3 encoder=dino decoder=vqvae proprio_emb_dim=40 training.batch_size=32 proprio_encoder training.epochs=1 training.proprio_encoder=dummy
+
+
+#MANISKILL
+python -m accelerate.commands.launch train.py --config-name "train copy.yaml" env=maniskill frameskip=5 num_hist=3 encoder=dino_cls decoder=transposed_conv proprio_emb_dim=50 training.batch_size=32 training.epochs=1 training.proprio_encoder=dummy
+python -m accelerate.commands.launch train.py --config-name "train copy.yaml" env=maniskill frameskip=5 num_hist=3 encoder=vc1 decoder=transposed_conv proprio_emb_dim=50 training.batch_size=32 training.epochs=1 training.proprio_encoder=dummy
+python -m accelerate.commands.launch train.py --config-name "train copy.yaml" env=maniskill frameskip=5 num_hist=3 encoder=resnet decoder=transposed_conv proprio_emb_dim=50 training.batch_size=32 training.epochs=1 training.proprio_encoder=dummy
+python -m accelerate.commands.launch train.py --config-name "train copy.yaml" env=maniskill frameskip=5 num_hist=3 encoder=scratch model.train_encoder=true decoder=transposed_conv proprio_emb_dim=50 training.batch_size=32 training.epochs=1 training.proprio_encoder=dummy
+python -m accelerate.commands.launch train.py --config-name "train copy.yaml" env=maniskill frameskip=5 num_hist=3 encoder=r3m decoder=transposed_conv proprio_emb_dim=50 training.batch_size=32 training.epochs=1 training.proprio_encoder=dummy
+python -m accelerate.commands.launch train.py --config-name "train copy.yaml" env=maniskill frameskip=5 num_hist=3 encoder=dino decoder=vqvae proprio_emb_dim=50  training.batch_size=32 training.epochs=1 training.proprio_encoder=dummy
+
+#carla
+## MANI might need to re-run maniskill with larger action embed dimension
+python -m accelerate.commands.launch train.py --config-name "train copy.yaml" env=carla frameskip=5 num_hist=3 encoder=dino_cls decoder=transposed_conv proprio_emb_dim=6 training.batch_size=32 training.epochs=1 training.proprio_encoder=dummy
+python -m accelerate.commands.launch train.py --config-name "train copy.yaml" env=carla frameskip=5 num_hist=3 encoder=vc1      decoder=transposed_conv proprio_emb_dim=6 training.batch_size=32 training.epochs=1 training.proprio_encoder=dummy
+python -m accelerate.commands.launch train.py --config-name "train copy.yaml" env=carla frameskip=5 num_hist=3 encoder=resnet   decoder=transposed_conv proprio_emb_dim=6 training.batch_size=32 training.epochs=1 training.proprio_encoder=dummy
+python -m accelerate.commands.launch train.py --config-name "train copy.yaml" env=carla frameskip=5 num_hist=3 encoder=scratch model.train_encoder=true decoder=transposed_conv proprio_emb_dim=6 training.batch_size=32 training.epochs=1 training.proprio_encoder=dummy
+python -m accelerate.commands.launch train.py --config-name "train copy.yaml" env=carla frameskip=5 num_hist=3 encoder=r3m      decoder=transposed_conv proprio_emb_dim=6 training.batch_size=32 training.epochs=1 training.proprio_encoder=dummy
+python -m accelerate.commands.launch train.py --config-name "train copy.yaml" env=carla frameskip=5 num_hist=3 encoder=dino     decoder=vqvae proprio_emb_dim=6  training.batch_size=32 training.epochs=1 training.proprio_encoder=dummy
+
+#dubins
+## MANI might need to re-run maniskill with larger action embed dimension
+python -m accelerate.commands.launch train.py --config-name "train copy.yaml" env=carla frameskip=5 num_hist=3 encoder=dino_cls decoder=transposed_conv proprio_emb_dim=3 training.batch_size=32 training.epochs=1 training.proprio_encoder=dummy
+python -m accelerate.commands.launch train.py --config-name "train copy.yaml" env=carla frameskip=5 num_hist=3 encoder=vc1      decoder=transposed_conv proprio_emb_dim=3 training.batch_size=32 training.epochs=1 training.proprio_encoder=dummy
+python -m accelerate.commands.launch train.py --config-name "train copy.yaml" env=carla frameskip=5 num_hist=3 encoder=resnet   decoder=transposed_conv proprio_emb_dim=3 training.batch_size=32 training.epochs=1 training.proprio_encoder=dummy
+python -m accelerate.commands.launch train.py --config-name "train copy.yaml" env=carla frameskip=5 num_hist=3 encoder=scratch model.train_encoder=true decoder=transposed_conv proprio_emb_dim=3 training.batch_size=32 training.epochs=1 training.proprio_encoder=dummy
+python -m accelerate.commands.launch train.py --config-name "train copy.yaml" env=carla frameskip=5 num_hist=3 encoder=r3m      decoder=transposed_conv proprio_emb_dim=3 training.batch_size=32 training.epochs=1 training.proprio_encoder=dummy
+python -m accelerate.commands.launch train.py --config-name "train copy.yaml" env=carla frameskip=5 num_hist=3 encoder=dino     decoder=vqvae proprio_emb_dim=3  training.batch_size=32 training.epochs=1 training.proprio_encoder=dummy
+
+
 

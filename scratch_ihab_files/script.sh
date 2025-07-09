@@ -41,9 +41,11 @@ python -m accelerate.commands.launch train.py --config-name "train copy.yaml" en
 
 # mkdir -p /storage1/fs1/sibai/Active/ihab/conda/envs
 # mkdir -p /storage1/fs1/sibai/Active/ihab/conda/pkgs
+
+###### HERE 
 export LSF_DOCKER_VOLUMES="/storage1/fs1/sibai/Active:/storage1/fs1/sibai/Active" 
 export LSF_DOCKER_SHM_SIZE='64g'  
-bsub -n 5 -Is -q general-interactive -R 'rusage[mem=52GB]' -M 50GB -R 'gpuhost' -gpu "num=1:gmem=30G"  -a 'docker(continuumio/anaconda3:2021.11)'  /bin/bash 
+bsub -n 10 -Is -q general-interactive -R 'rusage[mem=102GB]' -M 100GB -R 'gpuhost' -gpu "num=1:gmem=30G"  -a 'docker(continuumio/anaconda3:2021.11)'  /bin/bash 
 # bsub -n 12 -Is -q general-interactive -R 'rusage[mem=32GB]' -M 30 -R 'gpuhost' -gpu "num=1:gmem=10G"  -a 'docker(continuumio/anaconda3:2021.11)'  /bin/bash 
 # bsub -n 12 -Is -q general-interactive -R 'rusage[mem=32GB]' -M 30 -R 'gpuhost' -gpu "num=1:gmem=10G" -a 'docker(nvidia/cuda:11.8.0-base-ubuntu22.04)' /bin/bash
 # bsub -n 12 -Is -q general-interactive -R 'rusage[mem=32GB]' -M 30 -R 'gpuhost' -gpu "num=1:gmem=1G" -a 'docker(nvcr.io/nvidia/pytorch:23.10-py3)' /bin/bash

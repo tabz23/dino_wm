@@ -31,6 +31,8 @@ from deslib.dcs.lca     import LCA
 from deslib.dcs.mcb     import MCB
 from deslib.dcs.rank    import Rank
 from deslib.dcs.a_posteriori import APosteriori
+from deslib.dcs.a_priori import  APriori
+from deslib.dcs.mla import MLA
 
 # For loading your HJ policies
 from PyHJ.data import Collector, VectorReplayBuffer, Batch
@@ -429,23 +431,7 @@ def compute_dcs_selector_hj_grid(
 
             # --- Print neighbor ground truth and classifier predictions ---
             neighbor_indices = region_indices[0]  # shape (k,)
-            if X_train is not None and y_train is not None:
-                neighbor_X = X_train[neighbor_indices]
-                neighbor_y = y_train[neighbor_indices]
-                # print("Neighbor ground truth labels:", neighbor_y)
-
-                for clf_idx, clf in enumerate(ensemble):
-                    preds = clf.predict(neighbor_X)
-                    # print(f"Classifier {clf_idx} predictions on neighbors: {preds}")
-                    correct = preds == neighbor_y
-                    # print(f"Classifier {clf_idx} correct predictions: {correct} ({np.sum(correct)}/{len(correct)})")
-                    computed_competence = np.mean(correct)
-                    # print(f"Classifier {clf_idx} computed competence: {computed_competence:.3f}")
-            else:
-                # print("X_train and y_train not provided, skipping neighbor prediction debug.")
-
-            # 3) Competence estimates
-                comps = selector.estimate_competence(region_indices)  # shape (1, n_classifiers)
+            comps = selector.estimate_competence(region_indices,distances)  # shape (1, n_classifiers)
             # print("Competence estimates (from selector):", comps)
             # print("Competence estimates shape:", comps.shape)
 
@@ -457,7 +443,6 @@ def compute_dcs_selector_hj_grid(
             else:
                 idx = int(np.argmax(comps[0]))
             # print("Selected classifier index:", idx)
-
             # 5) Store selection + HJ value
             selected_i[i, j] = idx
             hj_val = ensemble[idx]._compute_hj_value([x, y, theta])
@@ -479,6 +464,15 @@ def compute_dcs_selector_hj_grid(
     print(f"Saved selected indices to {os.path.join(save_dir, 'selected_i.npy')}")
 
     return hj_vals, selected_i
+
+import numpy as np
+import os
+import inspect
+
+import numpy as np
+import os
+import inspect
+
 
 def plot_hj_ensemble_comparison(
     ensemble,
@@ -753,10 +747,13 @@ def evaluate_dcs_methods(
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """Exactly the same as DES, but for DCS methods (OLA, LCA, MCB)."""
     dcs_methods = {
-        'OLA': OLA(pool_classifiers=ensemble, k=20),
-        'LCA': LCA(pool_classifiers=ensemble, k=7),
-        'MCB': MCB(pool_classifiers=ensemble, k=7),
-        'RANK': Rank(pool_classifiers=ensemble,k=7)
+        'OLA': OLA(pool_classifiers=ensemble, k=10),
+        # 'LCA': LCA(pool_classifiers=ensemble, k=10),
+        # 'MCB': MCB(pool_classifiers=ensemble, k=10),
+        'RANK': Rank(pool_classifiers=ensemble,k=10),
+        # 'APosteriori': APosteriori(pool_classifiers=ensemble,k=10),
+        'APriori': APriori(pool_classifiers=ensemble,k=10),
+        # 'MLA': MLA(pool_classifiers=ensemble,k=10)
     }
     results, fitted = {}, {}
     for name, method in tqdm(dcs_methods.items(), desc="Evaluating DCS methods"):
@@ -840,19 +837,21 @@ def main():
     """Main pipeline for training and testing DES with HJ ensemble."""
     # Configuration
     DEVICE = 'cuda'  # Change to 'cuda' if you have GPU
-    N_SAMPLES = 500
+    N_SAMPLES = 5000
     TEST_SIZE = 0.1
     SEED = 42
     
     # Grid parameters for HJ plotting
     X_MIN, X_MAX = -3.0, 3.0
     Y_MIN, Y_MAX = -3.0, 3.0
-    NX, NY = 40,40
+    NX, NY = 120,120
     
     # Checkpoint configuration
     BASE_CHECKPOINT_PATH = "/storage1/fs1/sibai/Active/ihab/research_new/dino_wm/runs/ddpg_hj_dubins/20250706-164456"
     # CHECKPOINT_EPOCHS = [31, 12, 7 , 10]  # Use checkpoints 55-59
-    CHECKPOINT_EPOCHS = [13, 14, 15 , 16, 1]  # Use checkpoints 55-59
+    # CHECKPOINT_EPOCHS = [1, 14, 15 , 16, 13]  # Use checkpoints 55-59
+    # CHECKPOINT_EPOCHS = [11,10,9,8,7]  # Use checkpoints 55-59
+    CHECKPOINT_EPOCHS = [57,1,5,12,53]  # Use checkpoints 55-59
 
     
     # Initialize wandb
