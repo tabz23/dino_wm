@@ -594,42 +594,28 @@ def main():
     # 2) Load shared world model once
     shared_wm = load_shared_world_model(args.dino_ckpt_dir, args.device)
     
-    # 3) Setup encoder finetuning
-    encoder_optimizer = setup_encoder_finetuning(shared_wm, args)
-    
-    # 4) init W&B + TB writer + logger
+    # 3) init W&B + TB writer + logger
     from datetime import datetime
     timestamp = datetime.now().strftime("%m%d_%H%M")
-    exp_name = f"ddpg-{args.dino_encoder}-{timestamp}"
-    if args.with_finetune:
-        exp_name += "-finetune"
-    if args.with_proprio:
-        exp_name += "-proprio"
-    
     wandb.init(
         project=f"ddpg-hj-latent-dubins", 
-        name=exp_name,
+        name=f"ddpg-{args.dino_encoder}-{timestamp}",
         config=vars(args)
     )
-    writer = SummaryWriter(log_dir=f"runs/ddpg_hj_latent/{exp_name}/logs")
+    writer = SummaryWriter(log_dir=f"runs/ddpg_hj_latent/{args.dino_encoder}-{timestamp}/logs")
     wb_logger = WandbLogger()
     wb_logger.load(writer)
     logger = wb_logger
 
-    # 5) Create environments with shared world model
+    # 4) Create environments with shared world model
     train_envs = DummyVectorEnv([
-        lambda: LatentDubinsEnv(shared_wm=shared_wm, with_proprio=args.with_proprio, 
-                               finetune_mode=args.with_finetune)
+        lambda: LatentDubinsEnv(shared_wm=shared_wm, with_proprio=args.with_proprio)
         for _ in range(args.training_num)
     ])
     
-    test_envs = DummyVectorEnv([
-        lambda: LatentDubinsEnv(shared_wm=shared_wm, with_proprio=args.with_proprio, 
-                               finetune_mode=args.with_finetune)
-        for _ in range(args.test_num)
-    ])
-
-    # 6) extract shapes & max_action
+    # No test env needed since no testing loop
+    
+    # 5) extract shapes & max_action
     state_space  = train_envs.observation_space[0]
     action_space = train_envs.action_space[0]
     state_shape  = state_space.shape
@@ -638,30 +624,28 @@ def main():
                                 device=args.device,
                                 dtype=torch.float32)
 
-    # 7) build critic + actor networks
+    # 6) build critic + actor
     critic_net = Net(state_shape, action_shape,
                      hidden_sizes=args.critic_net,
-                      activation=getattr(torch.nn, args.critic_activation),
-                     concat=True,
-                     device=args.device)
-    
-    critic = Critic(critic_net, device=args.device).to(args.device)
+                     activation=getattr(torch.nn, args.critic_activation),
+                     concat=True, device=args.device)
+    critic      = Critic(critic_net, device=args.device).to(args.device)
     critic_optim = torch.optim.AdamW(
         critic.parameters(), lr=args.critic_lr,
         weight_decay=args.weight_decay_pyhj
     )
-    actor_net = Net(state_shape, action_shape,
-                    hidden_sizes=args.control_net,
-                    activation=getattr(torch.nn, args.actor_activation),
-                    device=args.device)
-    
-    actor = Actor(actor_net, action_shape,
-                  max_action=max_action,
-                  device=args.device).to(args.device)
+
+    actor_net   = Net(state_shape,
+                      hidden_sizes=args.control_net,
+                      activation=getattr(torch.nn, args.actor_activation),
+                      device=args.device)
+    actor       = Actor(actor_net, action_shape,
+                        max_action=max_action,
+                        device=args.device).to(args.device)
     actor_optim = torch.optim.AdamW(actor.parameters(), lr=args.actor_lr)
 
- 
-    policy = TensorAwareDDPGPolicy(
+    # 7) assemble your avoid‐DDPG policy
+    policy = avoid_DDPGPolicy_annealing(
         critic=critic, critic_optim=critic_optim,
         tau=args.tau, gamma=args.gamma_pyhj,
         exploration_noise=GaussianNoise(sigma=args.exploration_noise),
@@ -670,182 +654,94 @@ def main():
         action_space=action_space,
         actor=actor, actor_optim=actor_optim,
         actor_gradient_steps=args.actor_gradient_steps,
-        finetune_mode=args.with_finetune
     )
 
-    # 9) Create tensor-aware buffer
+    # 8) hook into policy.learn to capture losses
+    orig_learn = policy.learn
+    policy.last_actor_loss  = 0.0
+    policy.last_critic_loss = 0.0
+    def learn_and_record(batch, **kw):
+        metrics = orig_learn(batch, **kw)
+        policy.last_actor_loss  = metrics["loss/actor"]
+        policy.last_critic_loss = metrics["loss/critic"]
+        return metrics
+    policy.learn = learn_and_record
 
-    buffer = TensorAwareReplayBuffer(
-        size=args.buffer_size,
-        buffer_num=args.training_num,
-        stack_num=1,
-        finetune_mode=args.with_finetune,
-        device=args.device
-    )
+    # 9) define train_fn to log those to W&B
+    def train_fn(epoch: int, step_idx: int):
+        wandb.log({
+            "loss/actor":  policy.last_actor_loss,
+            "loss/critic": policy.last_critic_loss,
+        })
 
+    # 10) collectors and replay buffer
+    buffer          = VectorReplayBuffer(args.buffer_size, args.training_num)
+    train_collector = Collector(policy, train_envs, buffer, exploration_noise=True)
+    print("collecting some initial data")
+    train_collector.collect(10)
+    print("initial data collected")
 
-    # 10) Create tensor-aware collectors
-    train_collector = TensorAwareCollector(
-        policy, train_envs, buffer, 
-        exploration_noise=True,
-        finetune_mode=args.with_finetune
-    )
-    
-    test_collector = TensorAwareCollector(
-        policy, test_envs,
-        finetune_mode=args.with_finetune
-    )
+    # 11) choose headings & helper env (also uses shared model)
+    thetas = [0.0, np.pi/4, np.pi/2, 3*np.pi/4]
+    helper_env = LatentDubinsEnv(shared_wm=shared_wm, with_proprio=args.with_proprio)
 
-    # 11) Create a helper env for HJ plotting
-    helper_env = LatentDubinsEnv(
-        shared_wm=shared_wm, 
-        with_proprio=args.with_proprio,
-        finetune_mode=args.with_finetune
-    )
+    # 12) main training loop, 1 epoch at a time
+    log_path = Path(f"runs/ddpg_hj_latent/{args.dino_encoder}-{timestamp}")
+    for epoch in range(1, args.total_episodes + 1):
+        print(f"\n=== Epoch {epoch}/{args.total_episodes} ===")
 
-    # 12) Policy update function with encoder finetuning
-    def policy_update_fn(policy, batch, encoder_optimizer=None):
-        """Custom policy update function that handles encoder finetuning"""
-        if encoder_optimizer is not None:
-            encoder_optimizer.zero_grad()
-        
-        # Regular policy update
-        losses = policy.learn(batch)
-        
-        # If encoder finetuning is enabled, step the encoder optimizer
-        if encoder_optimizer is not None:
-            encoder_optimizer.step()
-        
-        return losses
+        stats = offpolicy_trainer(
+            policy=policy,
+            train_collector=train_collector,
+            test_collector=None,  # no test loop
+            max_epoch=1,
+            step_per_epoch=args.step_per_epoch,
+            step_per_collect=args.step_per_collect,
+            episode_per_test=0,
+            batch_size=args.batch_size_pyhj,
+            update_per_step=args.update_per_step,
+            stop_fn=lambda r: False,
+            train_fn=train_fn,        # log losses each epoch
+            save_best_fn=None,
+            logger=logger,
+        )
 
-    # 13) Custom trainer function with encoder finetuning
-    def custom_trainer(policy, train_collector, test_collector, max_epoch, 
-                      step_per_epoch, step_per_collect, test_num, batch_size, 
-                      update_per_step, encoder_optimizer=None, logger=None):
-        """Custom trainer that handles encoder finetuning"""
-        
-        # Pre-collect random samples
-        train_collector.collect(n_step=step_per_collect, no_grad=not args.with_finetune)
+        # Save policy checkpoint after each epoch
+        ckpt_dir = log_path / f"epoch_id_{epoch}"
+        ckpt_dir.mkdir(exist_ok=True, parents=True)
+        torch.save(policy.state_dict(), ckpt_dir / "policy.pth")
 
-        
-        global_step = 0
-        
-        for epoch in range(max_epoch):
-            # Collect training data
-            collect_result = train_collector.collect(n_step=step_per_collect, no_grad=not args.with_finetune)
+        # Log other numeric stats to wandb
+        numeric = {}
+        for k, v in stats.items():
+            if isinstance(v, (int, float)):
+                numeric[f"train/{k}"] = v
+            elif isinstance(v, np.generic):
+                numeric[f"train/{k}"] = float(v)
+        wandb.log(numeric, step=epoch)
 
-            collect_result = train_collector.collect(n_step=step_per_collect)
-            global_step += step_per_collect
-            print(f"Collected {collect_result['n/st'] if 'n/st' in collect_result else 'N/A'} steps")
-            print(f"Buffer length: {len(train_collector.buffer)}")
+        # Plot latent-space HJ filter & log to wandb
+        try:
+            fig1, fig2 = plot_hj(policy, helper_env, thetas, args)
+            wandb.log({
+                "HJ_latent/binary":     wandb.Image(fig1),
+                "HJ_latent/continuous": wandb.Image(fig2),
+            })
+            plt.close(fig1)
+            plt.close(fig2)
+            print("plotted")
+        except Exception as e:
+            print(f"Error plotting HJ values: {e}")
 
-            # Update policy
-            if len(train_collector.buffer) >= batch_size:
-                for _ in range(int(step_per_collect * update_per_step)):
-                    batch = train_collector.buffer.sample(batch_size)
-                    losses = policy_update_fn(policy, batch, encoder_optimizer)
-                    
-                    # Log losses
-                    if logger is not None:
-                        for key, value in losses.items():
-                            logger.log_scalar(f"train/{key}", value, global_step)
-            
-            # Test policy
-            if epoch % args.test_interval == 0:
-                test_result = test_collector.collect(n_episode=test_num)
-                
-                # Log test results
-                if logger is not None:
-                    logger.log_scalar("test/reward", test_result['rews'].mean(), global_step)
-                    logger.log_scalar("test/length", test_result['lens'].mean(), global_step)
-                
-                print(f"Epoch {epoch}: test_reward={test_result['rews'].mean():.3f}, "
-                      f"test_length={test_result['lens'].mean():.1f}")
-                
-                # Plot HJ values periodically
-                if epoch % args.plot_interval == 0:
-                    thetas = [0.0, np.pi/4, np.pi/2, 3*np.pi/4]
-                    fig1, fig2 = plot_hj(policy, helper_env, thetas, args)
-                    
-                    # Log plots to wandb
-                    wandb.log({
-                        f"hj_safe_mask_epoch_{epoch}": wandb.Image(fig1),
-                        f"hj_values_epoch_{epoch}": wandb.Image(fig2)
-                    })
-                    
-                    plt.close(fig1)
-                    plt.close(fig2)
-        
-        return policy
+    print("Training complete.")
 
-    # 14) Run training
-    print("Starting DDPG training...")
-    print(f"State shape: {state_shape}")
-    print(f"Action shape: {action_shape}")
-    print(f"Max action: {max_action}")
-    print(f"Encoder finetuning: {args.with_finetune}")
-    if args.with_finetune:
-        print(f"Encoder optimizer: {encoder_optimizer is not None}")
-    
-    # Calculate max epochs from total episodes
-    max_epoch = args.total_episodes // args.step_per_epoch
-    
-    # Run custom trainer
-    policy = custom_trainer(
-        policy=policy,
-        train_collector=train_collector,
-        test_collector=test_collector,
-        max_epoch=max_epoch,
-        step_per_epoch=args.step_per_epoch,
-        step_per_collect=args.step_per_collect,
-        test_num=args.test_num,
-        batch_size=args.batch_size_pyhj,
-        update_per_step=args.update_per_step,
-        encoder_optimizer=encoder_optimizer,
-        logger=logger
-    )
-
-    # 15) Final evaluation and plotting
-    print("Training completed. Running final evaluation...")
-    
-    # Final test
-    final_test_result = test_collector.collect(n_episode=args.test_num * 2)
-    print(f"Final test results:")
-    print(f"  Average reward: {final_test_result['rews'].mean():.3f}")
-    print(f"  Average length: {final_test_result['lens'].mean():.1f}")
-    
-    # Final HJ plot
-    thetas = [0.0, np.pi/6, np.pi/4, np.pi/3, np.pi/2, 2*np.pi/3, 3*np.pi/4, 5*np.pi/6]
-    fig1, fig2 = plot_hj(policy, helper_env, thetas, args)
-    
-    # Save final plots
-    wandb.log({
-        "final_hj_safe_mask": wandb.Image(fig1),
-        "final_hj_values": wandb.Image(fig2),
-        "final_test_reward": final_test_result['rews'].mean(),
-        "final_test_length": final_test_result['lens'].mean()
-    })
-    
-    plt.close(fig1)
-    plt.close(fig2)
-    
-    # 16) Save model
-    model_save_path = f"models/ddpg_hj_latent_{exp_name}.pth"
-    os.makedirs("models", exist_ok=True)
-    torch.save({
-        'policy_state_dict': policy.state_dict(),
-        'args': vars(args),
-        'final_test_reward': final_test_result['rews'].mean(),
-        'final_test_length': final_test_result['lens'].mean()
-    }, model_save_path)
-    
-    print(f"Model saved to: {model_save_path}")
-    
-    # Clean up
-    wandb.finish()
-    writer.close()
-    
-    print("Training and evaluation completed successfully!")
 
 if __name__ == "__main__":
     main()
+
+
+
+# python "train_HJ_dubinslatent(can_fine_tune_PVR)4.py" --with_finetune --dino_encoder r3m --finetune_lr 5e-6 --finetune_layers 2 --step-per-epoch 100 --nx 20 --ny 20
+# python "train_HJ_dubinslatent(can_fine_tune_PVR)4.py" --step-per-epoch 100 --dino_encoder r3m --nx 20 --ny 20
+
+python "train_HJ_dubinslatent(can_fine_tune_PVR)4.py" --with_finetune --dino_encoder r3m --finetune_lr 5e-6 --finetune_layers 2 --step-per-epoch 1000  --nx 20 --ny 20 --total-episodes 50 --seed 0
