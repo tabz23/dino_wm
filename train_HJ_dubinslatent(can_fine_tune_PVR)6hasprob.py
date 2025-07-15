@@ -26,6 +26,81 @@ from gymnasium.spaces import Box
 
 import yaml
 
+# ENCODER LOGGING FUNCTIONS
+def log_encoder_stats(shared_wm, encoder_optimizer, epoch, global_step):
+    """
+    Log encoder gradient norms and parameter changes with minimal overhead
+    """
+    if encoder_optimizer is None or shared_wm is None:
+        return
+    
+    # 1. Log gradient norms
+    total_grad_norm = 0
+    param_count = 0
+    param_with_grad_count = 0
+    
+    for param in shared_wm.encoder.parameters():
+        param_count += 1
+        if param.grad is not None:
+            param_norm = param.grad.data.norm(2)
+            total_grad_norm += param_norm.item() ** 2
+            param_with_grad_count += 1
+    
+    if param_with_grad_count > 0:
+        total_grad_norm = (total_grad_norm ** 0.5)
+        
+        # Log to wandb
+        import wandb
+        wandb.log({
+            "encoder/gradient_norm": total_grad_norm,
+            "encoder/params_with_grad": param_with_grad_count,
+            "encoder/total_params": param_count,
+            "encoder/learning_rate": encoder_optimizer.param_groups[0]['lr'],
+            "epoch": epoch,
+            "global_step": global_step
+        })
+        
+        print(f"Encoder: grad_norm={total_grad_norm:.6f}, params_with_grad={param_with_grad_count}/{param_count}")
+    else:
+        print(f"WARNING: No encoder gradients found! Total params: {param_count}")
+
+def create_param_tracker(shared_wm):
+    """Create a simple parameter tracker"""
+    if shared_wm is None or not hasattr(shared_wm, 'encoder'):
+        return None
+        
+    # Store initial parameters
+    initial_params = {}
+    for name, param in shared_wm.encoder.named_parameters():
+        initial_params[name] = param.data.clone()
+    print(f"Created parameter tracker for {len(initial_params)} encoder parameters")
+    return initial_params
+
+def log_param_changes(shared_wm, initial_params, epoch, global_step):
+    """Log parameter changes since initialization"""
+    if initial_params is None or shared_wm is None:
+        return
+        
+    total_change = 0
+    param_count = 0
+    
+    for name, param in shared_wm.encoder.named_parameters():
+        if name in initial_params:
+            change = (param.data - initial_params[name]).norm().item()
+            total_change += change
+            param_count += 1
+    
+    if param_count > 0:
+        avg_change = total_change / param_count
+        import wandb
+        wandb.log({
+            "encoder/avg_param_change": avg_change,
+            "encoder/total_param_change": total_change,
+            "epoch": epoch,
+            "global_step": global_step
+        })
+        print(f"Encoder param changes: avg={avg_change:.8f}, total={total_change:.6f}")
+
 def args_type(default):
     def parse_string(x):
         if default is None:
@@ -95,6 +170,13 @@ def get_args_and_merge_config():
     for key, val in vars(cfg_args).items():
         setattr(args, key.replace("-", "_"), val)
 
+    # DEBUG: Print final fine-tuning status
+    print(f"=== ARGUMENT PARSING COMPLETE ===")
+    print(f"args.with_finetune: {args.with_finetune} (type: {type(args.with_finetune)})")
+    print(f"args.encoder_lr: {args.encoder_lr}")
+    print(f"args.dino_encoder: {args.dino_encoder}")
+    print("=================================")
+
     return args
 
 
@@ -124,11 +206,12 @@ class LatentDubinsEnv(gym.Env):
         self.device = torch.device(device) if device else torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.with_proprio = with_proprio
         self.finetune_mode = with_finetune
+        self._debug_printed = False  # For debug prints
         
         # Use shared world model if provided, otherwise load new one
         if shared_wm is not None:
             self.wm = shared_wm
-            print("Using shared world model")
+            print(f"Using shared world model (finetune_mode: {self.finetune_mode})")
         else:
             # Load world model (only if not shared)
             if ckpt_dir is None:
@@ -141,7 +224,7 @@ class LatentDubinsEnv(gym.Env):
             num_action_repeat = train_cfg.num_action_repeat
             self.wm = load_model(snapshot, train_cfg, num_action_repeat, device=self.device)
             self.wm.eval()
-            print(f"Loaded new world model from {ckpt_dir}")
+            print(f"Loaded new world model from {ckpt_dir} (finetune_mode: {self.finetune_mode})")
         
         # Ensure world model is on correct device
         self.wm = self.wm.to(self.device)
@@ -167,13 +250,7 @@ class LatentDubinsEnv(gym.Env):
         self.action_space = self.env.action_space
 
     def reset(self):
-        """
-        Reset underlying Gym env and encode obs to latent.
-        Returns: (obs_latent, info_dict)
-        
-        NOTE: Always returns numpy arrays for compatibility with PyHJ framework.
-        The TensorAwareReplayBuffer will handle conversion.
-        """
+        """Reset underlying Gym env and encode obs to latent."""
         reset_out = self.env.reset()
         obs = reset_out[0] if isinstance(reset_out, tuple) else reset_out
         z = self._encode(obs)
@@ -185,15 +262,7 @@ class LatentDubinsEnv(gym.Env):
         return z, {}
 
     def step(self, action):
-        """
-        Step in Gym env: returns (obs_latent, reward, terminated, truncated, info).
-        Classic Gym returns (obs, reward, done, info).
-        We map done->terminated and truncated=False.
-        Reward is taken from info['h'].
-        
-        NOTE: Always returns numpy arrays for compatibility with PyHJ framework.
-        The TensorAwareReplayBuffer will handle conversion.
-        """
+        """Step in Gym env and encode observations to latent."""
         obs_out, _, done, info = self.env.step(action)
         terminated = done
         truncated = False
@@ -212,10 +281,6 @@ class LatentDubinsEnv(gym.Env):
     def _encode(self, obs):
         """
         Encode raw obs via DINO-WM into a flat latent vector.
-        Supports obs as dict or tuple (visual, proprio).
-        
-        In finetune mode, keeps gradients enabled and returns tensors.
-        In normal mode, disables gradients and can return numpy arrays.
         """
         # unpack obs
         if isinstance(obs, dict):
@@ -227,7 +292,15 @@ class LatentDubinsEnv(gym.Env):
             raise ValueError(f"Unexpected obs type: {type(obs)}")
         
         # Use gradients if encoder is being finetuned or if we're in finetune mode
-        use_gradients = self.finetune_mode or any(p.requires_grad for p in self.wm.encoder.parameters())
+        encoder_requires_grad = any(p.requires_grad for p in self.wm.encoder.parameters())
+        use_gradients = self.finetune_mode and encoder_requires_grad
+        
+        # DEBUG: Print once per environment
+        if not self._debug_printed:
+            print(f"Environment _encode: finetune_mode={self.finetune_mode}, "
+                  f"encoder_requires_grad={encoder_requires_grad}, use_gradients={use_gradients}")
+            self._debug_printed = True
+        
         context = torch.enable_grad() if use_gradients else torch.no_grad()
         
         with context:
@@ -267,6 +340,7 @@ class LatentDubinsEnv(gym.Env):
                 z_vis = z_vis.squeeze(0)
                 
                 return z_vis
+
 class TensorAwareReplayBuffer(VectorReplayBuffer):
     def __init__(
         self,
@@ -293,11 +367,7 @@ class TensorAwareReplayBuffer(VectorReplayBuffer):
         self.shared_wm = shared_wm
 
     def add(self, batch: Batch, buffer_ids: Optional[Union[np.ndarray, List[int]]] = None) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        """
-        Override add to handle observations properly.
-        Always stores as numpy arrays regardless of finetune mode.
-        Returns: (ptr, ep_rew, ep_len, ep_idx) as expected by Collector.
-        """
+        """Override add to handle observations properly."""
         # Convert any tensor observations to numpy for storage
         batch_copy = copy.deepcopy(batch)
         if hasattr(batch_copy, 'obs') and torch.is_tensor(batch_copy.obs):
@@ -307,32 +377,16 @@ class TensorAwareReplayBuffer(VectorReplayBuffer):
 
         # Call parent add method and capture returned values
         ptr, ep_rew, ep_len, ep_idx = super().add(batch_copy, buffer_ids=buffer_ids)
-
         return ptr, ep_rew, ep_len, ep_idx
 
     def sample(self, batch_size: int) -> Batch:
-        """
-        Override sample to handle parent class return format and ensure proper Batch creation.
-        """
+        """Override sample to handle parent class return format."""
         # Call parent sample method - VectorReplayBuffer returns (batch, indices)
         sample_result = super().sample(batch_size)
-        
-        # Debug: Check what the parent returns
-        print(f"Debug: Parent sample returned type: {type(sample_result)}")
-        if isinstance(sample_result, tuple):
-            print(f"Debug: Tuple length: {len(sample_result)}")
-            if len(sample_result) >= 1:
-                print(f"Debug: First element type: {type(sample_result[0])}")
         
         # Handle the tuple return from VectorReplayBuffer
         if isinstance(sample_result, tuple) and len(sample_result) >= 1:
             batch_data = sample_result[0]  # First element is the batch data
-            indices = sample_result[1] if len(sample_result) > 1 else None
-            
-            # Debug: Check batch_data structure
-            print(f"Debug: Batch data type: {type(batch_data)}")
-            if hasattr(batch_data, 'keys'):
-                print(f"Debug: Batch data keys: {batch_data.keys() if hasattr(batch_data, 'keys') else 'No keys method'}")
             
             # Ensure we have a proper Batch object
             if isinstance(batch_data, Batch):
@@ -342,39 +396,16 @@ class TensorAwareReplayBuffer(VectorReplayBuffer):
             else:
                 # Try to convert to Batch
                 batch = Batch()
-                # If batch_data is not a dict or Batch, we need to handle it differently
-                # This might be the raw numpy arrays, let's try to reconstruct the batch
                 try:
-                    # Attempt to access attributes directly if it's an object with attributes
-                    if hasattr(batch_data, 'obs'):
-                        batch.obs = batch_data.obs
-                    if hasattr(batch_data, 'obs_next'):
-                        batch.obs_next = batch_data.obs_next
-                    if hasattr(batch_data, 'act'):
-                        batch.act = batch_data.act
-                    if hasattr(batch_data, 'rew'):
-                        batch.rew = batch_data.rew
-                    if hasattr(batch_data, 'done'):
-                        batch.done = batch_data.done
-                    if hasattr(batch_data, 'terminated'):
-                        batch.terminated = batch_data.terminated
-                    if hasattr(batch_data, 'truncated'):
-                        batch.truncated = batch_data.truncated
-                    if hasattr(batch_data, 'info'):
-                        batch.info = batch_data.info
-                    if hasattr(batch_data, 'policy'):
-                        batch.policy = batch_data.policy
+                    # Attempt to access attributes directly
+                    for attr in ['obs', 'obs_next', 'act', 'rew', 'done', 'terminated', 'truncated', 'info', 'policy']:
+                        if hasattr(batch_data, attr):
+                            setattr(batch, attr, getattr(batch_data, attr))
                 except Exception as e:
-                    print(f"Debug: Error creating batch from data: {e}")
-                    # Fallback: create empty batch and let the policy handle it
+                    print(f"Error creating batch from data: {e}")
                     batch = Batch()
         else:
-            # If parent returned a Batch directly (shouldn't happen with VectorReplayBuffer)
             batch = sample_result if isinstance(sample_result, Batch) else Batch(sample_result)
-
-        # Debug: Check final batch structure
-        print(f"Debug: Final batch type: {type(batch)}")
-        print(f"Debug: Final batch keys: {list(batch.keys()) if hasattr(batch, 'keys') else 'No keys'}")
 
         # Convert all numpy arrays to tensors and move to device
         self._convert_batch_to_tensors(batch)
@@ -413,22 +444,14 @@ class TensorAwareReplayBuffer(VectorReplayBuffer):
                 if isinstance(value, Batch):
                     self._convert_batch_to_tensors(value)
                 elif isinstance(value, dict):
-                    # Convert dict to Batch and then convert tensors
                     batch_value = Batch(value)
                     self._convert_batch_to_tensors(batch_value)
                     setattr(batch, key, batch_value)
+
 class TensorAwareDDPGPolicy(avoid_DDPGPolicy_annealing):
-    """
-    Modified DDPG policy that can handle tensor observations for encoder finetuning.
-    """
+    """Modified DDPG policy that can handle tensor observations for encoder finetuning."""
     
     def __init__(self, actor, critic, actor_optim, critic_optim, finetune_mode=False, device='cuda', **kwargs):
-        print("actor:", actor)
-        print("critic:", critic)
-        print("actor_optim:", actor_optim)
-        print("critic_optim:", critic_optim)
-        print("kwargs:", kwargs)
-        
         # Extract required arguments from kwargs with defaults
         tau = kwargs.pop('tau', 0.005)
         gamma = kwargs.pop('gamma', 0.99)
@@ -478,39 +501,19 @@ class TensorAwareDDPGPolicy(avoid_DDPGPolicy_annealing):
     
     def _ensure_batch_on_device(self, batch):
         """Ensure all tensors in batch are on the correct device"""
-        if hasattr(batch, 'obs'):
-            batch.obs = self._ensure_tensor_on_device(batch.obs)
-        if hasattr(batch, 'obs_next'):
-            batch.obs_next = self._ensure_tensor_on_device(batch.obs_next)
-        if hasattr(batch, 'act'):
-            batch.act = self._ensure_tensor_on_device(batch.act)
-        if hasattr(batch, 'rew'):
-            batch.rew = self._ensure_tensor_on_device(batch.rew)
-        if hasattr(batch, 'done'):
-            batch.done = self._ensure_tensor_on_device(batch.done)
-        if hasattr(batch, 'terminated'):
-            batch.terminated = self._ensure_tensor_on_device(batch.terminated)
-        if hasattr(batch, 'truncated'):
-            batch.truncated = self._ensure_tensor_on_device(batch.truncated)
-        if hasattr(batch, 'returns'):
-            batch.returns = self._ensure_tensor_on_device(batch.returns)
+        for key in ['obs', 'obs_next', 'act', 'rew', 'done', 'terminated', 'truncated', 'returns']:
+            if hasattr(batch, key):
+                setattr(batch, key, self._ensure_tensor_on_device(getattr(batch, key)))
         return batch
         
     def forward(self, batch: Batch, state: Optional[Union[dict, Batch, np.ndarray]] = None,
                 model: str = "actor", input: str = "obs", **kwargs) -> Batch:
-        """
-        Override forward to handle tensor observations and ensure device consistency.
-        """
-        # Ensure batch is on correct device
+        """Override forward to handle tensor observations and ensure device consistency."""
         batch = self._ensure_batch_on_device(batch)
-        
         return super().forward(batch, state, model, input, **kwargs)
     
     def process_fn(self, batch: Batch, buffer, indices: np.ndarray) -> Batch:
-        """
-        Override process_fn to handle tensor observations properly and ensure device consistency.
-        """
-        # Ensure batch is on correct device
+        """Override process_fn to handle tensor observations properly."""
         batch = self._ensure_batch_on_device(batch)
         
         # Set requires_grad for observations if in finetune mode
@@ -523,19 +526,12 @@ class TensorAwareDDPGPolicy(avoid_DDPGPolicy_annealing):
         return super().process_fn(batch, buffer, indices)
     
     def learn(self, batch: Batch, **kwargs: Any) -> Dict[str, float]:
-        """
-        Override learn to ensure proper device handling throughout training.
-        """
-        # Ensure batch is on correct device
+        """Override learn to ensure proper device handling throughout training."""
         batch = self._ensure_batch_on_device(batch)
-        
-        # Call parent learn method
         return super().learn(batch, **kwargs)
 
     def exploration_noise(self, act: Union[np.ndarray, Batch], batch: Batch) -> Union[np.ndarray, Batch]:
-        """
-        Override exploration noise to handle device compatibility and tensor conversion.
-        """
+        """Override exploration noise to handle device compatibility."""
         import warnings
         
         if self._noise is None:
@@ -566,9 +562,7 @@ class TensorAwareDDPGPolicy(avoid_DDPGPolicy_annealing):
             return act
 
     @staticmethod
-    def _mse_optimizer(
-        batch: Batch, critic: torch.nn.Module, optimizer: torch.optim.Optimizer
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    def _mse_optimizer(batch: Batch, critic: torch.nn.Module, optimizer: torch.optim.Optimizer) -> Tuple[torch.Tensor, torch.Tensor]:
         """A simple wrapper script for updating critic network with device handling."""
         weight = getattr(batch, "weight", 1.0)
         
@@ -586,13 +580,14 @@ class TensorAwareDDPGPolicy(avoid_DDPGPolicy_annealing):
         optimizer.step()
         return td, critic_loss
 
-
-# 2. Update the create_policy_and_trainer function to enable exploration noise
-
 def create_policy_and_trainer(args, state_shape, action_shape, max_action, shared_wm):
     """Create policy and trainer with proper device handling"""
     
-    # 6) build critic + actor with explicit device placement
+    print(f"=== CREATING POLICY ===")
+    print(f"Fine-tuning enabled: {args.with_finetune}")
+    print(f"Encoder learning rate: {args.encoder_lr}")
+    
+    # Build critic + actor with explicit device placement
     critic_net = Net(state_shape, action_shape,
                      hidden_sizes=args.critic_net,
                      activation=getattr(torch.nn, args.critic_activation),
@@ -607,28 +602,36 @@ def create_policy_and_trainer(args, state_shape, action_shape, max_action, share
                   max_action=max_action,
                   device=args.device).to(args.device)
 
-    # 7) Create encoder optimizer if fine-tuning
+    # Create encoder optimizer if fine-tuning
     encoder_optimizer = None
     if args.with_finetune:
+        print("🔥 ENABLING ENCODER FINE-TUNING")
         # Enable gradients for encoder parameters
+        grad_enabled_count = 0
+        total_params = 0
         for param in shared_wm.encoder.parameters():
             param.requires_grad = True
+            grad_enabled_count += 1
+            total_params += 1
+        
         encoder_optimizer = torch.optim.Adam(shared_wm.encoder.parameters(), lr=args.encoder_lr)
-        print(f"Created encoder optimizer with lr={args.encoder_lr}")
+        print(f"✅ Created encoder optimizer with lr={args.encoder_lr}")
+        print(f"✅ Enabled gradients for {grad_enabled_count}/{total_params} encoder parameters")
     else:
+        print("❌ ENCODER FINE-TUNING DISABLED")
         # Ensure encoder parameters don't require gradients
         for param in shared_wm.encoder.parameters():
             param.requires_grad = False
 
-    # 8) Create exploration noise
+    # Create exploration noise
     exploration_noise = None
     if hasattr(args, 'exploration_noise') and args.exploration_noise > 0:
         exploration_noise = GaussianNoise(sigma=args.exploration_noise)
-        print(f"Created GaussianNoise with sigma={args.exploration_noise}")
+        print(f"✅ Created GaussianNoise with sigma={args.exploration_noise}")
     else:
-        print("Exploration noise disabled")
+        print("❌ Exploration noise disabled")
 
-    # 9) build DDPG policy with better initialization
+    # Build DDPG policy
     policy = TensorAwareDDPGPolicy(
         actor=actor,
         critic=critic,
@@ -636,108 +639,14 @@ def create_policy_and_trainer(args, state_shape, action_shape, max_action, share
         critic_optim=torch.optim.Adam(critic.parameters(), lr=args.critic_lr),
         tau=args.tau,
         gamma=args.gamma_pyhj,
-        exploration_noise=exploration_noise,  # Now properly set
+        exploration_noise=exploration_noise,
         estimation_step=args.n_step,
         finetune_mode=args.with_finetune,
         device=args.device
     )
 
+    print("======================")
     return policy, encoder_optimizer
-
-
-class FineTunablePolicy(avoid_DDPGPolicy_annealing):
-    """
-    Extended policy that re-encodes observations during training for fine-tuning.
-    """
-    def __init__(self, shared_wm=None, with_finetune=False, with_proprio=False, device='cuda', **kwargs):
-        super().__init__(**kwargs)
-        self.shared_wm = shared_wm
-        self.with_finetune = with_finetune
-        self.with_proprio = with_proprio
-        self.device = torch.device(device) if isinstance(device, str) else device
-        
-        # Set encoder mode
-        if self.shared_wm is not None:
-            if self.with_finetune:
-                self.shared_wm.train()
-            else:
-                self.shared_wm.eval()
-    
-    def _encode_raw_obs(self, raw_obs):
-        """
-        Re-encode raw observations with gradient flow for fine-tuning.
-        """
-        if self.shared_wm is None:
-            raise ValueError("Shared world model not available for re-encoding")
-        
-        # unpack obs
-        if isinstance(raw_obs, dict):
-            visual = raw_obs['visual']
-            proprio = raw_obs['proprio']
-        elif isinstance(raw_obs, (tuple, list)) and len(raw_obs) == 2:
-            visual, proprio = raw_obs
-        else:
-            raise ValueError(f"Unexpected obs type: {type(raw_obs)}")
-        
-        # prepare tensors
-        visual_np = np.transpose(visual, (2, 0, 1)).astype(np.float32)  # (C, H, W)
-        visual_np /= 255.0  # normalize to [0, 1]
-        vis_t = torch.from_numpy(visual_np).unsqueeze(0)  # -> (1, C, H, W)
-        vis_t = vis_t.unsqueeze(1)  # Add time dimension (1, 1, C, H, W)
-        vis_t = vis_t.to(self.device)
-
-        prop_t = torch.from_numpy(proprio).unsqueeze(0).to(self.device)
-        prop_t = prop_t.unsqueeze(1)  # Add singleton dimension (1, 1, D_prop)
-        
-        data = {'visual': vis_t, 'proprio': prop_t}
-        
-        lat = self.shared_wm.encode_obs(data)
-        
-        # flatten visual patches and concat proprio
-        if self.with_proprio:
-            z_vis = lat['visual'].reshape(1, -1)  # (1, N_patches * E_dim)
-            z_prop = lat['proprio'].squeeze(0)  # (1, D_prop)
-            z = torch.cat([z_vis, z_prop], dim=-1)  # (1, total_dim)
-            return z.squeeze(0)  # (total_dim,)
-        else:
-            z_vis = lat['visual'].reshape(1, -1)  # (1, N_patches * E_dim)
-            return z_vis.squeeze(0)  # (N_patches * E_dim,)
-    
-    def learn(self, batch, **kwargs):
-        """
-        Override learn to re-encode observations if fine-tuning is enabled.
-        """
-        if self.with_finetune and self.shared_wm is not None:
-            # Re-encode observations with gradient flow
-            # Check if batch has raw_obs in info
-            if hasattr(batch, 'info') and hasattr(batch.info, 'raw_obs'):
-                batch_size = len(batch.obs)
-                re_encoded_obs = []
-                re_encoded_obs_next = []
-                
-                for i in range(batch_size):
-                    # Re-encode current observation
-                    raw_obs = batch.info.raw_obs[i]
-                    if raw_obs is not None:
-                        z = self._encode_raw_obs(raw_obs)
-                        re_encoded_obs.append(z)
-                    else:
-                        # Fallback to original obs if raw_obs not available
-                        re_encoded_obs.append(torch.from_numpy(batch.obs[i]).to(self.device))
-                    
-                    # Re-encode next observation (if available)
-                    # Note: This is a simplified version. In practice, you might need to store
-                    # raw_obs_next in the environment as well
-                    re_encoded_obs_next.append(torch.from_numpy(batch.obs_next[i]).to(self.device))
-                
-                # Stack re-encoded observations
-                if re_encoded_obs:
-                    batch.obs = torch.stack(re_encoded_obs)
-                    batch.obs_next = torch.stack(re_encoded_obs_next)
-        
-        # Call parent learn method
-        return super().learn(batch, **kwargs)
-
 
 # Set up matplotlib config
 import os
@@ -748,9 +657,7 @@ import matplotlib.pyplot as plt
 import wandb
 
 def compute_hj_value(x, y, theta, policy, helper_env, args):
-    """
-    Compute the Hamilton-Jacobi filter value in latent space with strict device handling.
-    """
+    """Compute the Hamilton-Jacobi filter value in latent space."""
     # Set precise state without advancing dynamics
     obs_dict, _ = helper_env.env.reset(state=[x, y, theta])
     z0 = helper_env._encode(obs_dict)
@@ -783,10 +690,9 @@ def compute_hj_value(x, y, theta, policy, helper_env, args):
         obs = batch.obs.to(args.device)
         q_val = policy.critic(obs, a_old)
         return q_val.cpu().item()
+
 def plot_hj(policy, helper_env, thetas, args):
-    """
-    Plot the Hamilton-Jacobi safety filter in latent space with robust error handling.
-    """
+    """Plot the Hamilton-Jacobi safety filter in latent space."""
     xs = np.linspace(args.x_min, args.x_max, args.nx)
     ys = np.linspace(args.y_min, args.y_max, args.ny)
     
@@ -805,21 +711,11 @@ def plot_hj(policy, helper_env, thetas, args):
         for ix, x in enumerate(xs):
             for iy, y in enumerate(ys):
                 try:
-                    # Print progress for debugging
-                    # print(f"Computing HJ value at x={x:.2f}, y={y:.2f}, theta={theta:.2f}")
-                    
-                    # Verify device consistency before computation
-                    # print(f"Policy device - actor_old: {next(policy.actor_old.parameters()).device}")
-                    # print(f"Policy device - critic: {next(policy.critic.parameters()).device}")
-                    
                     val = compute_hj_value(x, y, theta, policy, helper_env, args)
                     vals[ix, iy] = val
                 except Exception as e:
                     print(f"Error computing HJ value at x={x:.2f}, y={y:.2f}, theta={theta:.2f}: {str(e)}")
                     vals[ix, iy] = 0  # Default value
-                    # Print stack trace for debugging
-                    import traceback
-                    traceback.print_exc()
 
         # Plot binary safe/unsafe
         axes1[i].imshow(
@@ -847,24 +743,23 @@ def plot_hj(policy, helper_env, thetas, args):
     fig1.tight_layout()
     fig2.tight_layout()
     return fig1, fig2
-# Replace the policy creation section in your main() function with this:
 
-
-
-    return policy, encoder_optimizer
 def custom_trainer(policy, train_collector, test_collector, max_epoch, 
                   step_per_epoch, step_per_collect, test_num, batch_size, 
-                  update_per_step, encoder_optimizer=None, logger=None, args=None):
+                  update_per_step, encoder_optimizer=None, logger=None, args=None, 
+                  shared_wm=None, initial_encoder_params=None):
     """Custom trainer that handles encoder finetuning with proper error handling"""
     
-    print("Starting data collection...")
+    print("🚀 Starting training...")
+    print(f"Fine-tuning mode: {args.with_finetune}")
+    print(f"Encoder optimizer: {encoder_optimizer is not None}")
     
     # Pre-collect random samples
     try:
         train_collector.collect(600, random=True, no_grad=False)
-        print(f"Pre-collected 600 random samples. Buffer size: {len(train_collector.buffer)}")
+        print(f"✅ Pre-collected 600 random samples. Buffer size: {len(train_collector.buffer)}")
     except Exception as e:
-        print(f"Error during pre-collection: {e}")
+        print(f"❌ Error during pre-collection: {e}")
         import traceback
         traceback.print_exc()
         return policy
@@ -872,48 +767,46 @@ def custom_trainer(policy, train_collector, test_collector, max_epoch,
     global_step = 0
     
     for epoch in range(max_epoch):
-        print(f"\n=== Epoch {epoch}/{max_epoch} ===")
+        print(f"\n=== Epoch {epoch+1}/{max_epoch} ===")
         
         # Collect training data
         try:
             collect_result = train_collector.collect(n_step=step_per_collect, no_grad=False)
             global_step += step_per_collect
-            print(f"Collected {step_per_collect} steps. Buffer size: {len(train_collector.buffer)}")
+            print(f"📊 Collected {step_per_collect} steps. Buffer size: {len(train_collector.buffer)}")
         except Exception as e:
-            print(f"Error during data collection: {e}")
+            print(f"❌ Error during data collection: {e}")
             import traceback
             traceback.print_exc()
             continue
         
         # Update policy
         if len(train_collector.buffer) >= batch_size:
-            print("Starting policy updates...")
+            print("🔄 Starting policy updates...")
             update_count = int(step_per_collect * update_per_step)
+            
+            total_actor_loss = 0
+            total_critic_loss = 0
+            successful_updates = 0
             
             for update_idx in range(update_count):
                 try:
                     # Sample batch from buffer
-                    print(f"Debug: Sampling batch of size {batch_size}")
                     batch = train_collector.buffer.sample(batch_size)
-                    print(f"Debug: Sampled batch with keys: {list(batch.keys()) if hasattr(batch, 'keys') else 'No keys'}")
                     
-                    # Get random indices for process_fn (required by some PyHJ methods)
+                    # Get random indices for process_fn
                     indices = np.random.randint(0, len(train_collector.buffer), size=batch_size)
                     
-                    # Process the batch (this should compute returns and other required fields)
-                    print("Debug: Processing batch with policy.process_fn")
+                    # Process the batch (computes returns)
                     processed_batch = policy.process_fn(batch, train_collector.buffer, indices)
-                    print(f"Debug: Processed batch keys: {list(processed_batch.keys()) if hasattr(processed_batch, 'keys') else 'No keys'}")
                     
                     # Check if returns field exists
                     if not hasattr(processed_batch, 'returns'):
-                        print("Warning: Batch missing 'returns' field after process_fn")
-                        # Try to compute returns manually as fallback
+                        print("⚠️  Warning: Batch missing 'returns' field after process_fn")
                         if hasattr(processed_batch, 'rew'):
                             processed_batch.returns = processed_batch.rew.clone()
-                            print("Debug: Created returns field from rewards")
                         else:
-                            print("Error: Cannot create returns field - no rewards available")
+                            print("❌ Error: Cannot create returns field - no rewards available")
                             continue
                     
                     # Clear gradients for encoder if fine-tuning
@@ -921,131 +814,149 @@ def custom_trainer(policy, train_collector, test_collector, max_epoch,
                         encoder_optimizer.zero_grad()
                     
                     # Update policy
-                    print("Debug: Calling policy.learn")
                     losses = policy.learn(processed_batch)
                     
-                    # Step encoder optimizer if fine-tuning
+                    # Step encoder optimizer and log gradients
                     if encoder_optimizer is not None:
+                        # Log gradients every 100 updates
+                        if update_idx % 100 == 0:
+                            total_grad_norm = 0
+                            param_count = 0
+                            for param in shared_wm.encoder.parameters():
+                                if param.grad is not None:
+                                    param_norm = param.grad.data.norm(2)
+                                    total_grad_norm += param_norm.item() ** 2
+                                    param_count += 1
+                            
+                            if param_count > 0:
+                                total_grad_norm = (total_grad_norm ** 0.5)
+                                wandb.log({
+                                    "encoder/gradient_norm_realtime": total_grad_norm,
+                                    "global_step": global_step + update_idx
+                                })
+                                print(f"🔥 Encoder gradient norm: {total_grad_norm:.6f}")
+                            else:
+                                print("⚠️  No encoder gradients found!")
+                        
                         encoder_optimizer.step()
                     
+                    # Accumulate losses
+                    total_actor_loss += losses.get('loss/actor', 0)
+                    total_critic_loss += losses.get('loss/critic', 0)
+                    successful_updates += 1
+                    
                     # Log losses occasionally
-                    if update_idx % 10 == 0:
+                    if update_idx % 50 == 0:
                         print(f"  Update {update_idx}/{update_count}: {losses}")
                     
-                    # Log to tensorboard/wandb
+                    # Log to wandb
                     if logger is not None:
                         for key, value in losses.items():
-                            # Use the correct method name for WandbLogger
                             try:
                                 logger.log_scalar(f"train/{key}", value, global_step + update_idx)
                             except AttributeError:
-                                # Fallback to direct wandb logging
                                 wandb.log({f"train/{key}": value}, step=global_step + update_idx)
                             
                 except Exception as e:
-                    print(f"Error during policy update {update_idx}: {e}")
+                    print(f"❌ Error during policy update {update_idx}: {e}")
                     import traceback
                     traceback.print_exc()
-                    # Continue with next update instead of failing completely
                     continue
             
-            print(f"Completed {update_count} policy updates")
+            # Print epoch summary
+            if successful_updates > 0:
+                avg_actor_loss = total_actor_loss / successful_updates
+                avg_critic_loss = total_critic_loss / successful_updates
+                print(f"📈 Epoch {epoch+1} Summary:")
+                print(f"   Successful updates: {successful_updates}/{update_count}")
+                print(f"   Avg actor loss: {avg_actor_loss:.6f}")
+                print(f"   Avg critic loss: {avg_critic_loss:.6f}")
+                
+                # Log epoch summary
+                wandb.log({
+                    "epoch_summary/avg_actor_loss": avg_actor_loss,
+                    "epoch_summary/avg_critic_loss": avg_critic_loss,
+                    "epoch_summary/successful_updates": successful_updates,
+                    "epoch": epoch,
+                    "global_step": global_step
+                })
+            
+            print(f"✅ Completed {successful_updates} policy updates")
         else:
-            print(f"Insufficient buffer size: {len(train_collector.buffer)} < {batch_size}")
+            print(f"⏳ Insufficient buffer size: {len(train_collector.buffer)} < {batch_size}")
         
-        # Plot HJ values periodically (every 10 epochs to avoid too frequent plotting)
+        # Log encoder stats every 10 epochs
+        if args.with_finetune and epoch % 10 == 0:
+            log_encoder_stats(shared_wm, encoder_optimizer, epoch, global_step)
+            log_param_changes(shared_wm, initial_encoder_params, epoch, global_step)
+        
+        # Plot HJ values every 5 epochs
         if epoch % 5 == 0:
             try:
-                print("Generating HJ plots...")
-                # Create a helper env for plotting
-                # DummyVectorEnv stores environments in .workers, not .envs
-                try:
-                    # Try to get shared_wm from the first environment
-                    first_env = train_collector.env.workers[0].env
-                    shared_wm_for_plot = first_env.wm if hasattr(first_env, 'wm') else None
-                except (AttributeError, IndexError):
-                    # Fallback to using the shared_wm from args
-                    shared_wm_for_plot = None
+                print("🎨 Generating HJ plots...")
                 
-                # Create helper env with appropriate parameters
-                if shared_wm_for_plot is not None:
-                    helper_env = LatentDubinsEnv(
-                        shared_wm=shared_wm_for_plot,
-                        with_proprio=args.with_proprio,
-                        with_finetune=False,  # No finetune for plotting
-                        device=args.device
-                    )
-                else:
-                    # Use checkpoint directory as fallback
-                    helper_env = LatentDubinsEnv(
-                        ckpt_dir=args.dino_ckpt_dir,
-                        with_proprio=args.with_proprio,
-                        with_finetune=False,  # No finetune for plotting
-                        device=args.device
-                    )
+                # Create helper env for plotting (always with finetune=False for plotting)
+                helper_env = LatentDubinsEnv(
+                    shared_wm=shared_wm,  # Use shared_wm directly
+                    with_proprio=args.with_proprio,
+                    with_finetune=False,  # Always False for plotting
+                    device=args.device
+                )
                 
                 thetas = [0.0, np.pi/4, np.pi/2, 3*np.pi/4]
                 fig1, fig2 = plot_hj(policy, helper_env, thetas, args)
                 
-                # Log plots to wandb
+                # Log plots to wandb with consistent keys
                 wandb.log({
-                    "HJ_Safe_Mask": wandb.Image(fig1),           # Consistent key - no epoch suffix
-                    "HJ_Values": wandb.Image(fig2),              # Consistent key - no epoch suffix  
+                    "HJ_Safe_Mask": wandb.Image(fig1),
+                    "HJ_Values": wandb.Image(fig2),
                     "epoch": epoch,
                     "global_step": global_step
-                }, step=global_step)  # Use step parameter for x-axis
+                }, step=global_step)
                 
                 plt.close(fig1)
                 plt.close(fig2)
-                print("HJ plots generated and logged")
+                print("✅ HJ plots generated and logged")
                 
             except Exception as e:
-                print(f"Error during HJ plotting: {e}")
+                print(f"❌ Error during HJ plotting: {e}")
                 import traceback
                 traceback.print_exc()
-                # Continue training even if plotting fails
     
     return policy
 
-# Policy update function
-def policy_update_fn(policy, batch, encoder_optimizer=None):
-    """Custom policy update function that handles encoder finetuning"""
-    if encoder_optimizer is not None:
-        encoder_optimizer.zero_grad()
-    
-    # Regular policy update
-    losses = policy.learn(batch)
-    
-    # If encoder finetuning is enabled, step the encoder optimizer
-    if encoder_optimizer is not None:
-        encoder_optimizer.step()
-    
-    return losses
-# Replace your main() function with this updated version:
-
 def main():
-    # 1) parse args + merge YAML
+    # 1) Parse args + merge YAML
     args = get_args_and_merge_config()
     
-    # cast to the right types
-    args.critic_lr         = float(args.critic_lr)
-    args.actor_lr          = float(args.actor_lr)
-    args.tau               = float(args.tau)
-    args.gamma_pyhj        = float(args.gamma_pyhj)
+    # Cast to the right types
+    args.critic_lr = float(args.critic_lr)
+    args.actor_lr = float(args.actor_lr)
+    args.tau = float(args.tau)
+    args.gamma_pyhj = float(args.gamma_pyhj)
     args.exploration_noise = float(args.exploration_noise)
-    args.update_per_step   = float(args.update_per_step)
-    args.step_per_epoch    = int(args.step_per_epoch)
-    args.step_per_collect  = int(args.step_per_collect)
-    args.test_num          = int(args.test_num)
-    args.training_num      = int(args.training_num)
-    args.total_episodes    = int(args.total_episodes)
-    args.batch_size_pyhj   = int(args.batch_size_pyhj)
-    args.buffer_size       = int(args.buffer_size)
+    args.update_per_step = float(args.update_per_step)
+    args.step_per_epoch = int(args.step_per_epoch)
+    args.step_per_collect = int(args.step_per_collect)
+    args.test_num = int(args.test_num)
+    args.training_num = int(args.training_num)
+    args.total_episodes = int(args.total_episodes)
+    args.batch_size_pyhj = int(args.batch_size_pyhj)
+    args.buffer_size = int(args.buffer_size)
     args.dino_ckpt_dir = os.path.join(args.dino_ckpt_dir, args.dino_encoder)
     
     # Set device
     args.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"Using device: {args.device}")
+    print(f"🖥️  Using device: {args.device}")
+    
+    # Final check of fine-tuning setting
+    print(f"\n🔍 FINAL CONFIGURATION CHECK:")
+    print(f"   Fine-tuning enabled: {args.with_finetune}")
+    print(f"   Encoder learning rate: {args.encoder_lr}")
+    print(f"   Exploration noise: {args.exploration_noise}")
+    print(f"   Total episodes: {args.total_episodes}")
+    print(f"   Step per collect: {args.step_per_collect}")
+    print(f"   Step per epoch: {args.step_per_epoch}")
     
     # Set random seeds
     np.random.seed(args.seed)
@@ -1056,9 +967,12 @@ def main():
     
     # 2) Load shared world model once
     shared_wm = load_shared_world_model(args.dino_ckpt_dir, args.device)
-    print(f"Shared world model loaded on device: {next(shared_wm.parameters()).device}")
+    print(f"🌍 Shared world model loaded on device: {next(shared_wm.parameters()).device}")
     
-    # 3) init W&B + TB writer + logger
+    # Create parameter tracker for encoder monitoring
+    initial_encoder_params = create_param_tracker(shared_wm) if args.with_finetune else None
+    
+    # 3) Initialize W&B + TB writer + logger
     from datetime import datetime
     timestamp = datetime.now().strftime("%m%d_%H%M")
     run_name = f"ddpg-{args.dino_encoder}-{timestamp}"
@@ -1074,45 +988,47 @@ def main():
     wb_logger = WandbLogger()
     wb_logger.load(writer)
     logger = wb_logger
+    
+    print(f"📊 Logging to wandb project: ddpg-hj-latent-dubins")
+    print(f"📊 Run name: {run_name}")
 
     # 4) Create environments with shared world model
-    print("Creating training environments...")
+    print("\n🏗️  Creating training environments...")
     train_envs = DummyVectorEnv([
         lambda: LatentDubinsEnv(shared_wm=shared_wm, with_proprio=args.with_proprio, 
-                               with_finetune=args.with_finetune, device=args.device)
+                               with_finetune=args.with_finetune, device=args.device)  # CRUCIAL: Use args.with_finetune
         for _ in range(args.training_num)
     ])
     
-    print("Creating test environments...")
+    print("🏗️  Creating test environments...")
     test_envs = DummyVectorEnv([
         lambda: LatentDubinsEnv(shared_wm=shared_wm, with_proprio=args.with_proprio, 
-                               with_finetune=False, device=args.device)  # No finetune for test
+                               with_finetune=False, device=args.device)  # Test should be False
         for _ in range(args.test_num)
     ])
 
-    # 5) extract shapes & max_action
-    state_space  = train_envs.observation_space[0]
+    # 5) Extract shapes & max_action
+    state_space = train_envs.observation_space[0]
     action_space = train_envs.action_space[0]
-    state_shape  = state_space.shape
+    state_shape = state_space.shape
     action_shape = action_space.shape or action_space.n
-    max_action   = torch.tensor(action_space.high,
-                                device=args.device,
-                                dtype=torch.float32)
+    max_action = torch.tensor(action_space.high, device=args.device, dtype=torch.float32)
 
-    print(f"State shape: {state_shape}")
-    print(f"Action shape: {action_shape}")
-    print(f"Max action: {max_action}")
+    print(f"\n📏 Environment specs:")
+    print(f"   State shape: {state_shape}")
+    print(f"   Action shape: {action_shape}")
+    print(f"   Max action: {max_action}")
 
     # 6) Create policy and trainer
     policy, encoder_optimizer = create_policy_and_trainer(
         args, state_shape, action_shape, max_action, shared_wm
     )
     
-    print(f"Policy created. Networks on device:")
-    print(f"  Actor: {next(policy.actor.parameters()).device}")
-    print(f"  Critic: {next(policy.critic.parameters()).device}")
-    print(f"  Actor_old: {next(policy.actor_old.parameters()).device}")
-    print(f"  Critic_old: {next(policy.critic_old.parameters()).device}")
+    print(f"\n🧠 Policy created. Networks on device:")
+    print(f"   Actor: {next(policy.actor.parameters()).device}")
+    print(f"   Critic: {next(policy.critic.parameters()).device}")
+    print(f"   Actor_old: {next(policy.actor_old.parameters()).device}")
+    print(f"   Critic_old: {next(policy.critic_old.parameters()).device}")
 
     # 7) Create tensor-aware buffer
     buffer = TensorAwareReplayBuffer(
@@ -1126,23 +1042,32 @@ def main():
     # 8) Create collectors
     train_collector = Collector(
         policy, train_envs, buffer, 
-        exploration_noise=True
+        exploration_noise=True  # Enable exploration noise for training
     )
     
     test_collector = Collector(
-        policy, test_envs
+        policy, test_envs,
+        exploration_noise=False  # Disable for testing
     )
 
     # 9) Calculate max epochs from total episodes
     max_epoch = args.total_episodes // args.step_per_epoch
-    print(f"Training for {max_epoch} epochs")
-    print(f"Encoder finetuning: {args.with_finetune}")
+    print(f"\n🎯 Training configuration:")
+    print(f"   Total epochs: {max_epoch}")
+    print(f"   Steps per epoch: {args.step_per_epoch}")
+    print(f"   Steps per collect: {args.step_per_collect}")
+    print(f"   Updates per step: {args.update_per_step}")
+    print(f"   Batch size: {args.batch_size_pyhj}")
+    
     if args.with_finetune:
-        print(f"Encoder optimizer: {encoder_optimizer is not None}")
-        print(f"Encoder requires_grad: {any(p.requires_grad for p in shared_wm.encoder.parameters())}")
+        print(f"🔥 Encoder fine-tuning: ENABLED")
+        print(f"   Encoder optimizer: {encoder_optimizer is not None}")
+        print(f"   Encoder requires_grad: {any(p.requires_grad for p in shared_wm.encoder.parameters())}")
+    else:
+        print(f"❌ Encoder fine-tuning: DISABLED")
 
     # 10) Run custom trainer
-    print("Starting DDPG training...")
+    print(f"\n🚀 Starting DDPG training...")
     try:
         policy = custom_trainer(
             policy=policy,
@@ -1156,20 +1081,20 @@ def main():
             update_per_step=args.update_per_step,
             encoder_optimizer=encoder_optimizer,
             logger=logger,
-            args=args
+            args=args,
+            shared_wm=shared_wm,
+            initial_encoder_params=initial_encoder_params
         )
-        print("Training completed successfully!")
+        print("🎉 Training completed successfully!")
     except Exception as e:
-        print(f"Training failed with error: {e}")
+        print(f"💥 Training failed with error: {e}")
         import traceback
         traceback.print_exc()
         return
 
-    # 11) Final evaluation and plotting
-    print("Training completed")
-    
+    # 11) Save model
+    print("\n💾 Saving model...")
     try:
-        # 12) Save model
         ckpt_dir = f"runs/ddpg_hj_latent/{run_name}"
         os.makedirs(ckpt_dir, exist_ok=True)
         model_save_path = os.path.join(ckpt_dir, "model_final.pth")
@@ -1177,14 +1102,13 @@ def main():
         torch.save({
             'policy_state_dict': policy.state_dict(),
             'args': vars(args),
-            'final_test_reward': final_test_result['rews'].mean(),
-            'final_test_length': final_test_result['lens'].mean()
+            'encoder_requires_grad': any(p.requires_grad for p in shared_wm.encoder.parameters()) if args.with_finetune else False
         }, model_save_path)
         
-        print(f"Model saved to: {model_save_path}")
+        print(f"✅ Model saved to: {model_save_path}")
         
     except Exception as e:
-        print(f"Final evaluation failed: {e}")
+        print(f"❌ Model saving failed: {e}")
         import traceback
         traceback.print_exc()
     
@@ -1192,35 +1116,7 @@ def main():
     wandb.finish()
     writer.close()
     
-    print("Training and evaluation completed!")
+    print("🏁 Training and evaluation completed!")
 
 if __name__ == "__main__":
     main()
-    
-# python "/storage1/fs1/sibai/Active/ihab/research_new/dino_wm/train_HJ_dubinslatent(can_fine_tune_PVR)6hasprob.py" \
-#     --dino_ckpt_dir "/storage1/fs1/sibai/Active/ihab/research_new/checkpt_dino/outputs/dubins/fully trained(prop repeated 3 times)" \
-#     --config train_HJ_configs.yaml \
-#     --dino_encoder dino \
-#     --with_finetune \
-#     --encoder_lr 1e-5 \
-#       --total-episodes 100000\
-#        --step-per-epoch 1000
-
-
-# python "/storage1/fs1/sibai/Active/ihab/research_new/dino_wm/train_HJ_dubinslatent(can_fine_tune_PVR)6hasprob.py"     --dino_ckpt_dir "/storage1/fs1/sibai/Active/ihab/research_new/checkpt_dino/outputs/dubins/fully trained(prop repeated 3 times)"     --config train_HJ_configs.yaml     --dino_encoder r3m     --with_finetune     --encoder_lr 1e-5       --total-episodes 100000       --step-per-epoch 1000 nx 5 ny 5
-
-
-# python "/storage1/fs1/sibai/Active/ihab/research_new/dino_wm/train_HJ_dubinslatent(can_fine_tune_PVR)6hasprob.py" \
-#     --dino_ckpt_dir "/storage1/fs1/sibai/Active/ihab/research_new/checkpt_dino/outputs/dubins/fully trained(prop repeated 3 times)" \
-#     --config train_HJ_configs.yaml \
-#     --dino_encoder dino \
-#     --with_finetune \
-#     --encoder_lr 1e-5 \
-#     --exploration_noise 0.1 \
-#     --total-episodes 500000 \
-#     --step-per-epoch 5000 \
-#     --step-per-collect 1000 \
-#     --update-per-step 1.0 \
-#     --batch-size-pyhj 256 \
-#     --nx 30 \
-#     --ny 30
