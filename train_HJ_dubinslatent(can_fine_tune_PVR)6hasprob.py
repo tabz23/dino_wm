@@ -25,7 +25,7 @@ from env.dubins.dubins import DubinsEnv
 from gymnasium.spaces import Box
 
 import yaml
-
+IndexType = Union[slice, int, np.ndarray, List[int]]
 # ENCODER LOGGING FUNCTIONS
 def log_encoder_stats(shared_wm, encoder_optimizer, epoch, global_step):
     """
@@ -196,7 +196,8 @@ def load_shared_world_model(ckpt_dir: str, device: str):
 class LatentDubinsEnv(gym.Env):
     """
     Wraps the classic Gym-based DubinsEnv into a Gymnasium-compatible Env.
-    Encodes observations into DINO-WM latent space and uses info['h'] as reward.
+    When with_finetune=True, returns raw observations for gradient flow.
+    Otherwise, encodes observations into DINO-WM latent space.
     """
     def __init__(self, shared_wm=None, ckpt_dir: str = None, device: str = None, 
                  with_proprio: bool = False, with_finetune: bool = False):
@@ -235,34 +236,66 @@ class LatentDubinsEnv(gym.Env):
         
         print("using proprio:", self.with_proprio)
         print("using finetune:", self.finetune_mode)
-        z = self._encode(obs)
         
-        # Always convert to numpy for observation space definition
-        if torch.is_tensor(z):
-            obs_shape = z.shape
-            z_numpy = z.detach().cpu().numpy()
+        if self.finetune_mode:
+            # For finetuning, we return raw observations
+            if isinstance(obs, dict):
+                visual = obs['visual']
+                proprio = obs['proprio']
+            elif isinstance(obs, (tuple, list)) and len(obs) == 2:
+                visual, proprio = obs
+            else:
+                raise ValueError(f"Unexpected obs type: {type(obs)}")
+            
+            # Define observation space as dict space for raw data
+            from gymnasium.spaces import Dict
+            self.observation_space = Dict({
+                'visual': Box(low=0, high=255, shape=visual.shape, dtype=np.uint8),
+                'proprio': Box(low=-np.inf, high=np.inf, shape=proprio.shape, dtype=np.float32)
+            })
         else:
-            z_numpy = z
-            obs_shape = z.shape
+            # For non-finetuning, encode and define latent space
+            z = self._encode(obs)
+            
+            # Always convert to numpy for observation space definition
+            if torch.is_tensor(z):
+                obs_shape = z.shape
+                z_numpy = z.detach().cpu().numpy()
+            else:
+                z_numpy = z
+                obs_shape = z.shape
+            
+            print(f"Example latent state z shape: {obs_shape}")
+            self.observation_space = Box(low=-np.inf, high=np.inf, shape=obs_shape, dtype=np.float32)
         
-        print(f"Example latent state z shape: {obs_shape}")
-        self.observation_space = Box(low=-np.inf, high=np.inf, shape=obs_shape, dtype=np.float32)
         self.action_space = self.env.action_space
 
     def reset(self):
-        """Reset underlying Gym env and encode obs to latent."""
+        """Reset underlying Gym env and return obs (raw or encoded based on mode)."""
         reset_out = self.env.reset()
         obs = reset_out[0] if isinstance(reset_out, tuple) else reset_out
-        z = self._encode(obs)
         
-        # Always convert to numpy for PyHJ compatibility
-        if torch.is_tensor(z):
-            z = z.detach().cpu().numpy()
-        
-        return z, {}
+        if self.finetune_mode:
+            # Return raw observations as dict
+            if isinstance(obs, dict):
+                return obs, {}
+            elif isinstance(obs, (tuple, list)) and len(obs) == 2:
+                visual, proprio = obs
+                return {'visual': visual, 'proprio': proprio}, {}
+            else:
+                raise ValueError(f"Unexpected obs type: {type(obs)}")
+        else:
+            # Encode observations
+            z = self._encode(obs)
+            
+            # Always convert to numpy for PyHJ compatibility
+            if torch.is_tensor(z):
+                z = z.detach().cpu().numpy()
+            
+            return z, {}
 
     def step(self, action):
-        """Step in Gym env and encode observations to latent."""
+        """Step in Gym env and return obs (raw or encoded based on mode)."""
         obs_out, _, done, info = self.env.step(action)
         terminated = done
         truncated = False
@@ -270,17 +303,32 @@ class LatentDubinsEnv(gym.Env):
         obs = obs_out[0] if isinstance(obs_out, tuple) else obs_out
         # override reward with safety metric
         h_s = info.get('h', 0.0) * 3  # Multiplied by 3 to make HJ easier to learn
-        z_next = self._encode(obs)
         
-        # Always convert to numpy for PyHJ compatibility
-        if torch.is_tensor(z_next):
-            z_next = z_next.detach().cpu().numpy()
-        
-        return z_next, h_s, terminated, truncated, info
+        if self.finetune_mode:
+            # Return raw observations as dict
+            if isinstance(obs, dict):
+                obs_dict = obs
+            elif isinstance(obs, (tuple, list)) and len(obs) == 2:
+                visual, proprio = obs
+                obs_dict = {'visual': visual, 'proprio': proprio}
+            else:
+                raise ValueError(f"Unexpected obs type: {type(obs)}")
+            
+            return obs_dict, h_s, terminated, truncated, info
+        else:
+            # Encode observations
+            z_next = self._encode(obs)
+            
+            # Always convert to numpy for PyHJ compatibility
+            if torch.is_tensor(z_next):
+                z_next = z_next.detach().cpu().numpy()
+            
+            return z_next, h_s, terminated, truncated, info
 
     def _encode(self, obs):
         """
         Encode raw obs via DINO-WM into a flat latent vector.
+        This should only be called when finetune_mode=False.
         """
         # unpack obs
         if isinstance(obs, dict):
@@ -291,19 +339,7 @@ class LatentDubinsEnv(gym.Env):
         else:
             raise ValueError(f"Unexpected obs type: {type(obs)}")
         
-        # Use gradients if encoder is being finetuned or if we're in finetune mode
-        encoder_requires_grad = any(p.requires_grad for p in self.wm.encoder.parameters())
-        use_gradients = self.finetune_mode and encoder_requires_grad
-        
-        # DEBUG: Print once per environment
-        if not self._debug_printed:
-            print(f"Environment _encode: finetune_mode={self.finetune_mode}, "
-                  f"encoder_requires_grad={encoder_requires_grad}, use_gradients={use_gradients}")
-            self._debug_printed = True
-        
-        context = torch.enable_grad() if use_gradients else torch.no_grad()
-        
-        with context:
+        with torch.no_grad():
             # prepare tensors
             visual_np = np.transpose(visual, (2, 0, 1)).astype(np.float32)  # (C, H, W)
             visual_np /= 255.0  # normalize to [0, 1]
@@ -316,11 +352,8 @@ class LatentDubinsEnv(gym.Env):
             
             data = {'visual': vis_t, 'proprio': prop_t}
             
-            # Ensure world model is in correct mode
-            if use_gradients:
-                self.wm.train()
-            else:
-                self.wm.eval()
+            # Ensure world model is in eval mode
+            self.wm.eval()
             
             lat = self.wm.encode_obs(data)
             
@@ -368,16 +401,8 @@ class TensorAwareReplayBuffer(VectorReplayBuffer):
 
     def add(self, batch: Batch, buffer_ids: Optional[Union[np.ndarray, List[int]]] = None) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """Override add to handle observations properly."""
-        # Convert any tensor observations to numpy for storage
-        batch_copy = copy.deepcopy(batch)
-        if hasattr(batch_copy, 'obs') and torch.is_tensor(batch_copy.obs):
-            batch_copy.obs = batch_copy.obs.detach().cpu().numpy()
-        if hasattr(batch_copy, 'obs_next') and torch.is_tensor(batch_copy.obs_next):
-            batch_copy.obs_next = batch_copy.obs_next.detach().cpu().numpy()
-
-        # Call parent add method and capture returned values
-        ptr, ep_rew, ep_len, ep_idx = super().add(batch_copy, buffer_ids=buffer_ids)
-        return ptr, ep_rew, ep_len, ep_idx
+        # No conversion needed - store raw data as is
+        return super().add(batch, buffer_ids=buffer_ids)
 
     def sample(self, batch_size: int) -> Batch:
         """Override sample to handle parent class return format."""
@@ -407,23 +432,29 @@ class TensorAwareReplayBuffer(VectorReplayBuffer):
         else:
             batch = sample_result if isinstance(sample_result, Batch) else Batch(sample_result)
 
-        # Convert all numpy arrays to tensors and move to device
-        self._convert_batch_to_tensors(batch)
-        
-        # Set requires_grad for observations if in finetune mode
-        if self.finetune_mode:
-            if hasattr(batch, 'obs') and torch.is_tensor(batch.obs):
-                batch.obs = batch.obs.requires_grad_(True)
-            if hasattr(batch, 'obs_next') and torch.is_tensor(batch.obs_next):
-                batch.obs_next = batch.obs_next.requires_grad_(True)
+        # For non-finetuning mode, convert numpy arrays to tensors
+        # For finetuning mode, keep observations as raw dicts
+        if not self.finetune_mode:
+            self._convert_batch_to_tensors(batch)
 
         return batch
+
+    def __getitem__(self, index: Union[str, IndexType]) -> Batch:
+        """Override getitem to ensure proper data format."""
+        result = super().__getitem__(index)
+        
+        # Always return raw data - conversion happens in the policy
+        return result
 
     def _convert_batch_to_tensors(self, batch: Batch) -> None:
         """Convert all numpy arrays in batch to tensors on the correct device."""
         for key in ['obs', 'obs_next', 'act', 'rew', 'done', 'terminated', 'truncated', 'returns', 'weight']:
             if hasattr(batch, key):
                 value = getattr(batch, key)
+                # Skip conversion for observations in finetune mode (keep as dict/Batch)
+                if key in ['obs', 'obs_next'] and self.finetune_mode and isinstance(value, (dict, Batch)):
+                    continue
+                    
                 if isinstance(value, np.ndarray):
                     if key in ['done', 'terminated', 'truncated']:
                         tensor_value = torch.from_numpy(value).bool().to(self.device)
@@ -451,7 +482,8 @@ class TensorAwareReplayBuffer(VectorReplayBuffer):
 class TensorAwareDDPGPolicy(avoid_DDPGPolicy_annealing):
     """Modified DDPG policy that can handle tensor observations for encoder finetuning."""
     
-    def __init__(self, actor, critic, actor_optim, critic_optim, finetune_mode=False, device='cuda', **kwargs):
+    def __init__(self, actor, critic, actor_optim, critic_optim, finetune_mode=False, 
+                 device='cuda', shared_wm=None, with_proprio=False, **kwargs):
         # Extract required arguments from kwargs with defaults
         tau = kwargs.pop('tau', 0.005)
         gamma = kwargs.pop('gamma', 0.99)
@@ -480,6 +512,9 @@ class TensorAwareDDPGPolicy(avoid_DDPGPolicy_annealing):
         )
         self.finetune_mode = finetune_mode
         self.device = torch.device(device) if isinstance(device, str) else device
+        self.shared_wm = shared_wm
+        self.with_proprio = with_proprio
+        self._debug_count = 0  # For debugging
         
         # Ensure all networks are on the correct device
         self.actor.to(self.device)
@@ -501,34 +536,167 @@ class TensorAwareDDPGPolicy(avoid_DDPGPolicy_annealing):
     
     def _ensure_batch_on_device(self, batch):
         """Ensure all tensors in batch are on the correct device"""
-        for key in ['obs', 'obs_next', 'act', 'rew', 'done', 'terminated', 'truncated', 'returns']:
+        for key in ['act', 'rew', 'done', 'terminated', 'truncated', 'returns']:
             if hasattr(batch, key):
                 setattr(batch, key, self._ensure_tensor_on_device(getattr(batch, key)))
         return batch
+    
+    def _encode_observations(self, obs_dict, detach=False):
+        """Encode raw observations using the world model.
+        
+        Args:
+            obs_dict: Dictionary or Batch containing visual and proprio data
+            detach: If True, detach the encoded observations from the computation graph
+        """
+        # Handle both dict and Batch types
+        if isinstance(obs_dict, Batch):
+            visual = obs_dict.visual
+            proprio = obs_dict.proprio
+        else:
+            visual = obs_dict['visual']
+            proprio = obs_dict['proprio']
+            
+        # Handle both single observations and batches
+        if isinstance(visual, np.ndarray):
+            if visual.ndim == 3:  # Single observation (H, W, C)
+                visual = visual[np.newaxis, ...]  # Add batch dimension
+                proprio = proprio[np.newaxis, ...]
+            batch_size = visual.shape[0]
+        else:
+            raise ValueError(f"Unexpected visual type: {type(visual)}")
+        
+        # Prepare visual tensor
+        visual_np = np.transpose(visual, (0, 3, 1, 2)).astype(np.float32)  # (B, H, W, C) -> (B, C, H, W)
+        visual_np /= 255.0  # normalize to [0, 1]
+        vis_t = torch.from_numpy(visual_np).unsqueeze(1).to(self.device)  # Add time dimension (B, 1, C, H, W)
+
+        # Prepare proprio tensor
+        if proprio.ndim == 1:  # Single observation
+            proprio = proprio[np.newaxis, ...]
+        prop_t = torch.from_numpy(proprio).unsqueeze(1).to(self.device)  # Add time dimension (B, 1, D_prop)
+        
+        data = {'visual': vis_t, 'proprio': prop_t}
+        
+        # Ensure world model is in train mode for gradients
+        self.shared_wm.train()
+        
+        # Encode with gradients
+        lat = self.shared_wm.encode_obs(data)
+        
+        # Flatten visual patches and concat proprio if needed
+        if self.with_proprio:
+            z_vis = lat['visual'].reshape(batch_size, -1)  # (B, N_patches * E_dim)
+            z_prop = lat['proprio'].squeeze(1)  # (B, D_prop)
+            z = torch.cat([z_vis, z_prop], dim=-1)  # (B, N_patches*E_dim + D_prop)
+        else:
+            z = lat['visual'].reshape(batch_size, -1)  # (B, N_patches * E_dim)
+        
+        # Detach if requested (for target networks)
+        if detach:
+            z = z.detach()
+        
+        # If single observation, remove batch dimension
+        if batch_size == 1:
+            z = z.squeeze(0)
+            
+        return z
+    
+    def _target_q(self, buffer, indices: np.ndarray) -> torch.Tensor:
+        """Override _target_q to handle raw observations properly."""
+        batch = buffer[indices]  # batch.obs_next: s_{t+n}
+        
+        # If finetuning, encode the observations with detach for target network
+        if self.finetune_mode and hasattr(batch, 'obs_next'):
+            obs_next = batch.obs_next
+            if isinstance(obs_next, (dict, Batch)) and 'visual' in obs_next and 'proprio' in obs_next:
+                # Encode observations without gradients for target network
+                with torch.no_grad():
+                    encoded_obs_next = self._encode_observations(obs_next, detach=True)
+                batch.obs_next = encoded_obs_next
+        
+        # Get actions from actor_old with encoded observations
+        with torch.no_grad():
+            act = self(batch, model='actor_old', input='obs_next').act
+        
+        # Compute Q-value
+        target_q = self.critic_old(batch.obs_next, act)
+        
+        return target_q
         
     def forward(self, batch: Batch, state: Optional[Union[dict, Batch, np.ndarray]] = None,
                 model: str = "actor", input: str = "obs", **kwargs) -> Batch:
         """Override forward to handle tensor observations and ensure device consistency."""
         batch = self._ensure_batch_on_device(batch)
+        
+        # Process observations if in finetune mode
+        if self.finetune_mode and hasattr(batch, input):
+            obs = getattr(batch, input)
+            if isinstance(obs, (dict, Batch)) and 'visual' in obs and 'proprio' in obs:
+                # For forward pass, encode without detaching
+                encoded_obs = self._encode_observations(obs, detach=False)
+                # Create new batch with encoded observations
+                batch_new = Batch()
+                for key in batch.keys():
+                    if key == input:
+                        setattr(batch_new, key, encoded_obs)
+                    else:
+                        setattr(batch_new, key, getattr(batch, key))
+                batch = batch_new
+        
+        # Debug print occasionally
+        if self._debug_count % 100 == 0 and self.finetune_mode:
+            obs = getattr(batch, input)
+            if torch.is_tensor(obs):
+                print(f"Forward debug - obs type: {type(obs)}, obs shape: {obs.shape if hasattr(obs, 'shape') else 'N/A'}")
+        self._debug_count += 1
+        
         return super().forward(batch, state, model, input, **kwargs)
     
     def process_fn(self, batch: Batch, buffer, indices: np.ndarray) -> Batch:
         """Override process_fn to handle tensor observations properly."""
         batch = self._ensure_batch_on_device(batch)
-        
-        # Set requires_grad for observations if in finetune mode
-        if self.finetune_mode:
-            if hasattr(batch, 'obs') and torch.is_tensor(batch.obs):
-                batch.obs = batch.obs.requires_grad_(True)
-            if hasattr(batch, 'obs_next') and torch.is_tensor(batch.obs_next):
-                batch.obs_next = batch.obs_next.requires_grad_(True)
-        
+        # Don't encode here - let the parent class handle it
         return super().process_fn(batch, buffer, indices)
     
-    def learn(self, batch: Batch, **kwargs: Any) -> Dict[str, float]:
-        """Override learn to ensure proper device handling throughout training."""
-        batch = self._ensure_batch_on_device(batch)
+import torch.nn.functional as F
+
+def learn(self, batch: Batch, **kwargs: Any) -> Dict[str, float]:
+    if not self.finetune_mode:
+        # If not fine-tuning, use the parent class's learn method
         return super().learn(batch, **kwargs)
+    
+    # For fine-tune mode, retain the graph for multiple backward passes
+    # Compute target Q-values using the target networks
+    with torch.no_grad():
+        a_ = self(batch, model='actor_old', input='obs_next').act
+        target_q = self.critic_old(batch.obs_next, a_).flatten()
+        target_q = batch.rew + self._gamma * target_q * (1 - batch.terminated)
+    
+    # Compute current Q-values
+    current_q = self.critic(batch.obs, batch.act).flatten()
+    q_loss = F.mse_loss(current_q, target_q)
+    
+    # Update critic with retained graph
+    self.critic_optim.zero_grad()
+    q_loss.backward(retain_graph=True)  # Retain graph for actor loss
+    self.critic_optim.step()
+    
+    # Compute actor loss
+    a = self(batch).act
+    actor_loss = -self.critic(batch.obs, a).mean()
+    
+    # Update actor
+    self.actor_optim.zero_grad()
+    actor_loss.backward()
+    self.actor_optim.step()
+    
+    # Update target networks
+    self.sync_weight()
+    
+    return {
+        'loss/critic': q_loss.item(),
+        'loss/actor': actor_loss.item(),
+    }
 
     def exploration_noise(self, act: Union[np.ndarray, Batch], batch: Batch) -> Union[np.ndarray, Batch]:
         """Override exploration noise to handle device compatibility."""
@@ -560,26 +728,7 @@ class TensorAwareDDPGPolicy(avoid_DDPGPolicy_annealing):
         else:
             warnings.warn("Cannot add exploration noise to non-numpy_array action.")
             return act
-
-    @staticmethod
-    def _mse_optimizer(batch: Batch, critic: torch.nn.Module, optimizer: torch.optim.Optimizer) -> Tuple[torch.Tensor, torch.Tensor]:
-        """A simple wrapper script for updating critic network with device handling."""
-        weight = getattr(batch, "weight", 1.0)
         
-        # Ensure weight is on the same device if it's a tensor
-        if torch.is_tensor(weight):
-            weight = weight.to(batch.obs.device)
-        
-        current_q = critic(batch.obs, batch.act).flatten()
-        target_q = batch.returns.flatten()
-        td = current_q - target_q
-        critic_loss = (td.pow(2) * weight).mean()
-
-        optimizer.zero_grad()
-        critic_loss.backward()
-        optimizer.step()
-        return td, critic_loss
-
 def create_policy_and_trainer(args, state_shape, action_shape, max_action, shared_wm):
     """Create policy and trainer with proper device handling"""
     
@@ -631,7 +780,7 @@ def create_policy_and_trainer(args, state_shape, action_shape, max_action, share
     else:
         print("❌ Exploration noise disabled")
 
-    # Build DDPG policy
+    # Build DDPG policy with shared_wm
     policy = TensorAwareDDPGPolicy(
         actor=actor,
         critic=critic,
@@ -642,7 +791,9 @@ def create_policy_and_trainer(args, state_shape, action_shape, max_action, share
         exploration_noise=exploration_noise,
         estimation_step=args.n_step,
         finetune_mode=args.with_finetune,
-        device=args.device
+        device=args.device,
+        shared_wm=shared_wm,
+        with_proprio=args.with_proprio
     )
 
     print("======================")
@@ -1008,9 +1159,19 @@ def main():
     ])
 
     # 5) Extract shapes & max_action
-    state_space = train_envs.observation_space[0]
+    # For finetuning mode, we need the encoded observation shape
+    if args.with_finetune:
+        # Get a sample observation to determine encoded shape
+        sample_env = LatentDubinsEnv(shared_wm=shared_wm, with_proprio=args.with_proprio, 
+                                    with_finetune=False, device=args.device)
+        sample_obs, _ = sample_env.reset()
+        state_shape = sample_obs.shape
+        print(f"📏 Encoded observation shape: {state_shape}")
+    else:
+        state_space = train_envs.observation_space[0]
+        state_shape = state_space.shape
+    
     action_space = train_envs.action_space[0]
-    state_shape = state_space.shape
     action_shape = action_space.shape or action_space.n
     max_action = torch.tensor(action_space.high, device=args.device, dtype=torch.float32)
 
@@ -1120,3 +1281,13 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
+    
+    # python "/storage1/fs1/sibai/Active/ihab/research_new/dino_wm/train_HJ_dubinslatent(can_fine_tune_PVR)6hasprob.py" \
+    # --dino_ckpt_dir "/storage1/fs1/sibai/Active/ihab/research_new/checkpt_dino/outputs/dubins/fully trained(prop repeated 3 times)" \
+    # --config train_HJ_configs.yaml \
+    # --dino_encoder r3m \
+    # --with_finetune \
+    # --encoder_lr 1e-5 \
+    # --total-episodes 100000
+    # --step-per-epoch 1000
