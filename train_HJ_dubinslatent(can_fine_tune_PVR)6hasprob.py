@@ -532,6 +532,39 @@ class TensorAwareDDPGPolicy(avoid_DDPGPolicy_annealing):
         # Call parent learn method
         return super().learn(batch, **kwargs)
 
+    def exploration_noise(self, act: Union[np.ndarray, Batch], batch: Batch) -> Union[np.ndarray, Batch]:
+        """
+        Override exploration noise to handle device compatibility and tensor conversion.
+        """
+        import warnings
+        
+        if self._noise is None:
+            return act
+            
+        # Convert act to numpy if it's a tensor for noise addition
+        if isinstance(act, torch.Tensor):
+            act_np = act.detach().cpu().numpy()
+            was_tensor = True
+            original_device = act.device
+        else:
+            act_np = act
+            was_tensor = False
+            original_device = None
+            
+        if isinstance(act_np, np.ndarray):
+            # Add noise to numpy array
+            noise_sample = self._noise(act_np.shape)
+            noisy_act = act_np + noise_sample
+            
+            # Convert back to tensor if original was tensor
+            if was_tensor:
+                noisy_act = torch.from_numpy(noisy_act).float().to(original_device)
+            
+            return noisy_act
+        else:
+            warnings.warn("Cannot add exploration noise to non-numpy_array action.")
+            return act
+
     @staticmethod
     def _mse_optimizer(
         batch: Batch, critic: torch.nn.Module, optimizer: torch.optim.Optimizer
@@ -552,6 +585,65 @@ class TensorAwareDDPGPolicy(avoid_DDPGPolicy_annealing):
         critic_loss.backward()
         optimizer.step()
         return td, critic_loss
+
+
+# 2. Update the create_policy_and_trainer function to enable exploration noise
+
+def create_policy_and_trainer(args, state_shape, action_shape, max_action, shared_wm):
+    """Create policy and trainer with proper device handling"""
+    
+    # 6) build critic + actor with explicit device placement
+    critic_net = Net(state_shape, action_shape,
+                     hidden_sizes=args.critic_net,
+                     activation=getattr(torch.nn, args.critic_activation),
+                     concat=True, device=args.device)
+    critic = Critic(critic_net, device=args.device).to(args.device)
+    
+    actor_net = Net(state_shape,
+                    hidden_sizes=args.control_net,
+                    activation=getattr(torch.nn, args.actor_activation),
+                    device=args.device)
+    actor = Actor(actor_net, action_shape,
+                  max_action=max_action,
+                  device=args.device).to(args.device)
+
+    # 7) Create encoder optimizer if fine-tuning
+    encoder_optimizer = None
+    if args.with_finetune:
+        # Enable gradients for encoder parameters
+        for param in shared_wm.encoder.parameters():
+            param.requires_grad = True
+        encoder_optimizer = torch.optim.Adam(shared_wm.encoder.parameters(), lr=args.encoder_lr)
+        print(f"Created encoder optimizer with lr={args.encoder_lr}")
+    else:
+        # Ensure encoder parameters don't require gradients
+        for param in shared_wm.encoder.parameters():
+            param.requires_grad = False
+
+    # 8) Create exploration noise
+    exploration_noise = None
+    if hasattr(args, 'exploration_noise') and args.exploration_noise > 0:
+        exploration_noise = GaussianNoise(sigma=args.exploration_noise)
+        print(f"Created GaussianNoise with sigma={args.exploration_noise}")
+    else:
+        print("Exploration noise disabled")
+
+    # 9) build DDPG policy with better initialization
+    policy = TensorAwareDDPGPolicy(
+        actor=actor,
+        critic=critic,
+        actor_optim=torch.optim.Adam(actor.parameters(), lr=args.actor_lr),
+        critic_optim=torch.optim.Adam(critic.parameters(), lr=args.critic_lr),
+        tau=args.tau,
+        gamma=args.gamma_pyhj,
+        exploration_noise=exploration_noise,  # Now properly set
+        estimation_step=args.n_step,
+        finetune_mode=args.with_finetune,
+        device=args.device
+    )
+
+    return policy, encoder_optimizer
+
 
 class FineTunablePolicy(avoid_DDPGPolicy_annealing):
     """
@@ -757,50 +849,7 @@ def plot_hj(policy, helper_env, thetas, args):
     return fig1, fig2
 # Replace the policy creation section in your main() function with this:
 
-def create_policy_and_trainer(args, state_shape, action_shape, max_action, shared_wm):
-    """Create policy and trainer with proper device handling"""
-    
-    # 6) build critic + actor with explicit device placement
-    critic_net = Net(state_shape, action_shape,
-                     hidden_sizes=args.critic_net,
-                     activation=getattr(torch.nn, args.critic_activation),
-                     concat=True, device=args.device)
-    critic = Critic(critic_net, device=args.device).to(args.device)
-    
-    actor_net = Net(state_shape,
-                    hidden_sizes=args.control_net,
-                    activation=getattr(torch.nn, args.actor_activation),
-                    device=args.device)
-    actor = Actor(actor_net, action_shape,
-                  max_action=max_action,
-                  device=args.device).to(args.device)
 
-    # 7) Create encoder optimizer if fine-tuning
-    encoder_optimizer = None
-    if args.with_finetune:
-        # Enable gradients for encoder parameters
-        for param in shared_wm.encoder.parameters():
-            param.requires_grad = True
-        encoder_optimizer = torch.optim.Adam(shared_wm.encoder.parameters(), lr=args.encoder_lr)
-        print(f"Created encoder optimizer with lr={args.encoder_lr}")
-    else:
-        # Ensure encoder parameters don't require gradients
-        for param in shared_wm.encoder.parameters():
-            param.requires_grad = False
-
-    # 8) build DDPG policy with better initialization
-    policy = TensorAwareDDPGPolicy(
-        actor=actor,
-        critic=critic,
-        actor_optim=torch.optim.Adam(actor.parameters(), lr=args.actor_lr),
-        critic_optim=torch.optim.Adam(critic.parameters(), lr=args.critic_lr),
-        tau=args.tau,
-        gamma=args.gamma_pyhj,
-        exploration_noise=None,
-        estimation_step=args.n_step,
-        finetune_mode=args.with_finetune,
-        device=args.device
-    )
 
     return policy, encoder_optimizer
 def custom_trainer(policy, train_collector, test_collector, max_epoch, 
@@ -905,7 +954,7 @@ def custom_trainer(policy, train_collector, test_collector, max_epoch,
             print(f"Insufficient buffer size: {len(train_collector.buffer)} < {batch_size}")
         
         # Plot HJ values periodically (every 10 epochs to avoid too frequent plotting)
-        if epoch % 10 == 0:
+        if epoch % 5 == 0:
             try:
                 print("Generating HJ plots...")
                 # Create a helper env for plotting
@@ -940,11 +989,11 @@ def custom_trainer(policy, train_collector, test_collector, max_epoch,
                 
                 # Log plots to wandb
                 wandb.log({
-                    f"hj_safe_mask_epoch_{epoch}": wandb.Image(fig1),
-                    f"hj_values_epoch_{epoch}": wandb.Image(fig2),
+                    "HJ_Safe_Mask": wandb.Image(fig1),           # Consistent key - no epoch suffix
+                    "HJ_Values": wandb.Image(fig2),              # Consistent key - no epoch suffix  
                     "epoch": epoch,
                     "global_step": global_step
-                })
+                }, step=global_step)  # Use step parameter for x-axis
                 
                 plt.close(fig1)
                 plt.close(fig2)
@@ -1077,7 +1126,7 @@ def main():
     # 8) Create collectors
     train_collector = Collector(
         policy, train_envs, buffer, 
-        exploration_noise=False
+        exploration_noise=True
     )
     
     test_collector = Collector(
@@ -1117,37 +1166,9 @@ def main():
         return
 
     # 11) Final evaluation and plotting
-    print("Training completed. Running final evaluation...")
+    print("Training completed")
     
     try:
-        # Final test
-        final_test_result = test_collector.collect(n_episode=args.test_num * 2)
-        print(f"Final test results:")
-        print(f"  Average reward: {final_test_result['rews'].mean():.3f}")
-        print(f"  Average length: {final_test_result['lens'].mean():.1f}")
-        
-        # Final HJ plot
-        helper_env = LatentDubinsEnv(
-            shared_wm=shared_wm, 
-            with_proprio=args.with_proprio,
-            with_finetune=False,
-            device=args.device
-        )
-        
-        thetas = [0.0, np.pi/6, np.pi/4, np.pi/3, np.pi/2, 2*np.pi/3, 3*np.pi/4, 5*np.pi/6]
-        fig1, fig2 = plot_hj(policy, helper_env, thetas, args)
-        
-        # Save final plots
-        wandb.log({
-            "final_hj_safe_mask": wandb.Image(fig1),
-            "final_hj_values": wandb.Image(fig2),
-            "final_test_reward": final_test_result['rews'].mean(),
-            "final_test_length": final_test_result['lens'].mean()
-        })
-        
-        plt.close(fig1)
-        plt.close(fig2)
-        
         # 12) Save model
         ckpt_dir = f"runs/ddpg_hj_latent/{run_name}"
         os.makedirs(ckpt_dir, exist_ok=True)
@@ -1185,4 +1206,21 @@ if __name__ == "__main__":
 #       --total-episodes 100000\
 #        --step-per-epoch 1000
 
+
 # python "/storage1/fs1/sibai/Active/ihab/research_new/dino_wm/train_HJ_dubinslatent(can_fine_tune_PVR)6hasprob.py"     --dino_ckpt_dir "/storage1/fs1/sibai/Active/ihab/research_new/checkpt_dino/outputs/dubins/fully trained(prop repeated 3 times)"     --config train_HJ_configs.yaml     --dino_encoder r3m     --with_finetune     --encoder_lr 1e-5       --total-episodes 100000       --step-per-epoch 1000 nx 5 ny 5
+
+
+# python "/storage1/fs1/sibai/Active/ihab/research_new/dino_wm/train_HJ_dubinslatent(can_fine_tune_PVR)6hasprob.py" \
+#     --dino_ckpt_dir "/storage1/fs1/sibai/Active/ihab/research_new/checkpt_dino/outputs/dubins/fully trained(prop repeated 3 times)" \
+#     --config train_HJ_configs.yaml \
+#     --dino_encoder dino \
+#     --with_finetune \
+#     --encoder_lr 1e-5 \
+#     --exploration_noise 0.1 \
+#     --total-episodes 500000 \
+#     --step-per-epoch 5000 \
+#     --step-per-collect 1000 \
+#     --update-per-step 1.0 \
+#     --batch-size-pyhj 256 \
+#     --nx 30 \
+#     --ny 30
