@@ -362,10 +362,16 @@ class AvoidDDPGPolicy:
         self.critic_old = deepcopy(critic)
         self.tau = tau
         self.gamma = gamma
-        self.exploration_noise = exploration_noise
+        self._noise = exploration_noise  # Changed back to match original naming
         self.device = device
-        self.actor_gradient_steps = 5
         self.with_proprio = with_proprio
+        
+        # Exact same parameters as original
+        self.actor_gradient_steps = 5
+        self.new_expl = True
+        self.warmup = False
+        self._n_step = 1
+        self._rew_norm = False
 
     def train(self):
         self.actor.train()
@@ -377,34 +383,66 @@ class AvoidDDPGPolicy:
 
     @torch.no_grad()
     def sync_weight(self):
-        """Optimized weight synchronization using in-place operations"""
+        """Soft-update the weight for the target network - exact as original"""
         for target_param, param in zip(self.actor_old.parameters(), self.actor.parameters()):
             target_param.mul_(1 - self.tau).add_(param.data, alpha=self.tau)
         for target_param, param in zip(self.critic_old.parameters(), self.critic.parameters()):
             target_param.mul_(1 - self.tau).add_(param.data, alpha=self.tau)
 
-    def learn(self, batch, wm, with_finetune, encoder_optim):
-        obs_batch, act_batch, rew_batch, obs_next_batch, done_batch = batch
-        requires_grad = with_finetune
-        
-        # Encode current and next states
-        z = encode_batch_optimized(obs_batch, wm, self.device, self.with_proprio, requires_grad=requires_grad)
-        z_next = encode_batch_optimized(obs_next_batch, wm, self.device, self.with_proprio, requires_grad=requires_grad)
-        
-        # Actions and rewards are already tensors from OptimizedReplayBuffer
-        act = act_batch
-        rew = rew_batch
-
-        # Critic loss
+    def _target_q(self, obs_next_batch, wm):
+        """Predict the value of a state - exact as original _target_q method"""
+        z_next = encode_batch_optimized(obs_next_batch, wm, self.device, self.with_proprio, requires_grad=False)
         with torch.no_grad():
             a_next = self.actor_old(z_next)
             target_q = self.critic_old(z_next, a_next)
-            target_q = self.gamma * torch.minimum(rew, target_q) + (1 - self.gamma) * rew
-        
-        current_q = self.critic(z, act)
-        critic_loss = F.mse_loss(current_q, target_q)
+        return target_q
 
-        # Backprop critic loss
+    def _nstep_return_approximated_avoid_Bellman_equation(self, rew, terminal_value, gamma):
+        """
+        Implements the exact avoid Bellman equation from the original code.
+        Convention: negative is unsafe
+        V = min(l(x), V(x'))
+        """
+        target_shape = terminal_value.shape
+        bsz = target_shape[0]
+        
+        # Take the worst between safety now and safety in the future
+        target_q = gamma * torch.minimum(
+            rew.reshape(bsz, 1),  # safety now
+            terminal_value  # safety in the future
+        ) + (1 - gamma) * rew.reshape(bsz, 1)  # discount toward safety now
+        
+        return target_q.reshape(target_shape)
+
+    def compute_nstep_return(self, obs_batch, act_batch, rew_batch, obs_next_batch, done_batch, wm):
+        """Compute the target q values using the avoid Bellman equation"""
+        batch_size = rew_batch.shape[0]
+        
+        # Get target Q values
+        target_q = self._target_q(obs_next_batch, wm)
+        
+        # Apply the avoid Bellman equation
+        returns = self._nstep_return_approximated_avoid_Bellman_equation(rew_batch, target_q, self.gamma)
+        
+        return returns
+
+    def learn(self, batch, wm, with_finetune, encoder_optim):
+        """Update critic network and actor network - exact as original learn method"""
+        obs_batch, act_batch, rew_batch, obs_next_batch, done_batch = batch
+        requires_grad = with_finetune
+        
+        # Encode current states
+        z = encode_batch_optimized(obs_batch, wm, self.device, self.with_proprio, requires_grad=requires_grad)
+        
+        # Compute target returns using avoid Bellman equation
+        target_returns = self.compute_nstep_return(obs_batch, act_batch, rew_batch, obs_next_batch, done_batch, wm)
+        
+        # Critic update - using original's _mse_optimizer logic
+        current_q = self.critic(z, act_batch).flatten()
+        target_q = target_returns.flatten()
+        td = current_q - target_q
+        critic_loss = td.pow(2).mean()  # MSE loss as in original
+
         self.critic_optim.zero_grad()
         if with_finetune:
             encoder_optim.zero_grad()
@@ -414,54 +452,86 @@ class AvoidDDPGPolicy:
         
         grad_norm = 0.0
         if with_finetune:
-            # Compute gradient norm more efficiently
             grad_norm = torch.nn.utils.clip_grad_norm_(wm.parameters(), max_norm=float('inf'))
             encoder_optim.step()
 
-        # Actor loss with detached z
-        z_detached = z.detach()
-        a = self.actor(z_detached)
-        actor_loss = -self.critic(z_detached, a).mean()
+        # Actor update - exact as original: "update actor 5 times for each critic update"
+        z_detached = z.detach()  # Detach to avoid gradients flowing to critic
+        
+        if not self.warmup:
+            # Store individual losses for logging (not averaging)
+            actor_losses = []
+            for _ in range(self.actor_gradient_steps):
+                a = self.actor(z_detached)
+                actor_loss = -self.critic(z_detached, a).mean()
+                self.actor_optim.zero_grad()
+                actor_loss.backward()
+                self.actor_optim.step()
+                actor_losses.append(actor_loss.item())
+            # Return the last actor loss (not average) to match original
+            final_actor_loss = actor_losses[-1]
+        else:
+            final_actor_loss = 0.0
 
-        # Backprop actor loss
-        self.actor_optim.zero_grad()
-        actor_loss.backward()
-        self.actor_optim.step()
-
+        # Soft update the parameters - exact as original
         self.sync_weight()
-
+        
         return {
-            "loss/actor": actor_loss.item(),
+            "loss/actor": final_actor_loss,
             "loss/critic": critic_loss.item(),
             "grad_norm": grad_norm if with_finetune else 0.0
         }
 
-class ParallelEnvCollector:
-    """Collects trajectories from multiple environments in parallel"""
-    def __init__(self, envs, policy, shared_wm, device, with_proprio, exploration_noise):
-        self.envs = envs
-        self.policy = policy
-        self.shared_wm = shared_wm
-        self.device = device
-        self.with_proprio = with_proprio
-        self.exploration_noise = exploration_noise
-        self.num_envs = len(envs)
+    def exploration_noise(self, act, batch_obs):
+        """
+        Exact replication of original exploration_noise method.
+        Note: In original, this is called with (act, batch) where batch contains obs
+        """
+        # Convert to numpy if needed
+        if isinstance(act, torch.Tensor):
+            act = act.cpu().numpy()
         
+        # Apply Gaussian noise first (if enabled)
+        if self._noise is not None and self._noise > 0:
+            noise = np.random.normal(0, self._noise, act.shape)
+            act = act + noise
+        
+        # Value-based exploration - exact as original
+        if self.new_expl:
+            rand_act = np.random.uniform(-1, 1, act.shape)
+            
+            # Encode observations for critic evaluation
+            z = encode_batch_optimized(batch_obs, self.shared_wm, self.device, self.with_proprio, requires_grad=False)
+            rand_act_tensor = torch.from_numpy(rand_act).float().to(self.device)
+            
+            with torch.no_grad():
+                values = self.critic(z, rand_act_tensor).cpu().detach().numpy()
+            
+            # Use random action where critic value < 0 (unsafe region)
+            act = np.where(values < 0.0, rand_act, act)
+
+        # Warmup override - exact as original
+        if self.warmup:
+            act = np.random.uniform(-1, 1, act.shape)
+
+        return act
+
 class ParallelEnvCollector:
     """Collects a fixed number of transitions from multiple envs in parallel"""
-    def __init__(self, envs, policy, shared_wm, device, with_proprio, exploration_noise):
+    def __init__(self, envs, policy, shared_wm, device, with_proprio):
         self.envs = envs
         self.policy = policy
         self.shared_wm = shared_wm
         self.device = device
         self.with_proprio = with_proprio
-        self.exploration_noise = exploration_noise
         self.num_envs = len(envs)
+        # Store shared_wm in policy for exploration_noise method
+        self.policy.shared_wm = shared_wm
 
     def collect_trajectories(self, buffer, max_steps: int=1000):
         """
         Collect up to `max_steps` transitions across all envs.
-        Stops early if you reach max_steps.
+        Uses exact same exploration as original avoid_DDPGPolicy_annealing
         """
         # 1) Reset all envs and keep their latest obs
         obs_list = [env.reset()[0] for env in self.envs]
@@ -485,14 +555,19 @@ class ParallelEnvCollector:
                                        self.device,
                                        self.with_proprio,
                                        requires_grad=False)
+            
+            # 4) Get actions from actor (without noise first)
             with torch.no_grad():
-                actions = self.policy.actor(z).cpu().numpy()
+                raw_actions = self.policy.actor(z).cpu().numpy()
 
-            # 4) optionally add noise
-            if np.random.rand() < self.exploration_noise:
-                actions = np.random.uniform(-1, 1, actions.shape)
+            # 5) Apply exact same exploration as original
+            # Note: pass active_obs as the batch argument
+            actions = self.policy.exploration_noise(raw_actions, active_obs)
+            
+            # Clip actions to valid range
+            actions = np.clip(actions, -1, 1)
 
-            # 5) step each active env and store transitions
+            # 6) step each active env and store transitions
             for idx, env_idx in enumerate(active_idxs):
                 env = self.envs[env_idx]
                 action = actions[idx]
@@ -506,7 +581,6 @@ class ParallelEnvCollector:
 
                 if steps >= max_steps:
                     break
-
 
 def main():
     args = get_args_and_merge_config()
@@ -583,8 +657,7 @@ def main():
     buffer = OptimizedReplayBuffer(args.buffer_size, device, dummy_obs, action_dim)
 
     # Initialize parallel collector
-    collector = ParallelEnvCollector(train_envs, policy, shared_wm, device, 
-                                   args.with_proprio, args.exploration_noise)
+    collector = ParallelEnvCollector(train_envs, policy, shared_wm, device, args.with_proprio)
 
     timestamp = datetime.now().strftime("%m%d_%H%M")
     log_dir = Path(f"runs/ddpg_hj_latent/{args.dino_encoder}-{timestamp}/")
@@ -648,5 +721,6 @@ def main():
 
 if __name__ == "__main__":
     main()
-# python "/storage1/fs1/sibai/Active/ihab/research_new/dino_wm/train_HJ_dubinslatent_withfinetune.py" --dino_ckpt_dir "/storage1/fs1/sibai/Active/ihab/research_new/checkpt_dino/outputs/dubins/fully trained(prop repeated 3 times)" --config train_HJ_configs.yaml --dino_encoder vc1 --with_finetune --encoder_lr 1e-6 --nx 20 --ny 20 --step-per-epoch 20 --total-episodes 150
-# python "/storage1/fs1/sibai/Active/ihab/research_new/dino_wm/train_HJ_dubinslatent_withfinetune.py" --dino_ckpt_dir "/storage1/fs1/sibai/Active/ihab/research_new/checkpt_dino/outputs/dubins/fully trained(prop repeated 3 times)" --config train_HJ_configs.yaml --dino_encoder vc1  --nx 20 --ny 20 --step-per-epoch 20 
+    
+    
+    # python "/storage1/fs1/sibai/Active/ihab/research_new/dino_wm/train_HJ_dubinslatent_withfinetune.py" --dino_ckpt_dir "/storage1/fs1/sibai/Active/ihab/research_new/checkpt_dino/outputs/dubins/fully trained(prop repeated 3 times)" --config train_HJ_configs.yaml --dino_encoder vc1  --nx 50 --ny 50 --step-per-epoch 200 --total-episodes 200 --batch_size-pyhj 64 --gamma-pyhj 0.99
