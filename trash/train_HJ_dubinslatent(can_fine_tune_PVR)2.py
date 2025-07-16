@@ -6,8 +6,6 @@ import gymnasium as gym  # We use Gymnasium API for vector envs
 import numpy as np
 from torch.utils.tensorboard import SummaryWriter
 from omegaconf import OmegaConf
-from typing import Any, Dict, List, Union, Optional
-import copy
 
 # PyHJ components for DDPG training
 from PyHJ.data import Collector, VectorReplayBuffer, Batch
@@ -106,94 +104,6 @@ def get_args_and_merge_config():
     return args
 
 
-class TensorAwareReplayBuffer(VectorReplayBuffer):
-    def __init__(
-        self,
-        size: int,
-        buffer_num: int,
-        stack_num: int = 1,
-        ignore_obs_next: bool = True,
-        save_only_last_obs: bool = False,
-        sample_avail: bool = False,
-        device: str = "cpu",
-        finetune_mode: bool = False,
-    ):
-        super().__init__(
-            total_size=size,
-            buffer_num=buffer_num,
-            stack_num=stack_num,
-            ignore_obs_next=ignore_obs_next,
-            save_only_last_obs=save_only_last_obs,
-            sample_avail=sample_avail,
-        )
-        self.device = torch.device(device)
-        self.finetune_mode = finetune_mode
-
-
-    def add(self, batch: Batch, buffer_ids: Optional[Union[np.ndarray, List[int]]] = None) -> None:
-        """Override add to handle tensor observations when in finetune mode"""
-        if self.finetune_mode:
-            # Convert tensor observations to numpy for storage, but keep track of original tensors
-            batch_copy = copy.deepcopy(batch)
-            if hasattr(batch_copy, 'obs') and torch.is_tensor(batch_copy.obs):
-                batch_copy.obs = batch_copy.obs.detach().cpu().numpy()
-            if hasattr(batch_copy, 'obs_next') and torch.is_tensor(batch_copy.obs_next):
-                batch_copy.obs_next = batch_copy.obs_next.detach().cpu().numpy()
-            return super().add(batch_copy, buffer_ids)
-        else:
-            return super().add(batch_copy, buffer_ids)
- 
-
-    
-    def sample(self, batch_size: int) -> Batch:
-        """Override sample to convert back to tensors when in finetune mode"""
-        batch = super().sample(batch_size)
-        if self.finetune_mode:
-            # Convert numpy arrays back to tensors
-            if hasattr(batch, 'obs') and isinstance(batch.obs, np.ndarray):
-                batch.obs = torch.from_numpy(batch.obs).to(self.device)
-            if hasattr(batch, 'obs_next') and isinstance(batch.obs_next, np.ndarray):
-                batch.obs_next = torch.from_numpy(batch.obs_next).to(self.device)
-            if hasattr(batch, 'act') and isinstance(batch.act, np.ndarray):
-                batch.act = torch.from_numpy(batch.act).to(self.device)
-            if hasattr(batch, 'rew') and isinstance(batch.rew, np.ndarray):
-                batch.rew = torch.from_numpy(batch.rew).to(self.device)
-            if hasattr(batch, 'done') and isinstance(batch.done, np.ndarray):
-                batch.done = torch.from_numpy(batch.done).to(self.device)
-        return batch
-
-
-class TensorAwareCollector(Collector):
-    """
-    Modified collector that can handle tensor observations from the environment
-    and convert them appropriately for the buffer.
-    """
-    
-    def __init__(self, policy, env, buffer=None, preprocess_fn=None, exploration_noise=False, finetune_mode=False):
-        super().__init__(policy, env, buffer, preprocess_fn, exploration_noise)
-        self.finetune_mode = finetune_mode
-        
-    def collect(
-        self,
-        n_step: Optional[int] = None,
-        n_episode: Optional[int] = None,
-        random: bool = False,
-        render: Optional[float] = None,
-        no_grad: bool = True,
-        gym_reset_kwargs: Optional[Dict[str, Any]] = None,
-    ):
-        return super().collect(
-            n_step=n_step,
-            n_episode=n_episode,
-            random=random,
-            render=render,
-            no_grad=no_grad,
-            gym_reset_kwargs=gym_reset_kwargs,
-        )
-
-        
-
-
 def setup_encoder_finetuning(wm, args):
     """
     Set up encoder finetuning by freezing/unfreezing appropriate layers
@@ -282,6 +192,7 @@ def setup_encoder_finetuning(wm, args):
         num_trainable_params = sum(p.numel() for p in trainable_params)
         print(f"  - Trainable parameters: {num_trainable_params}")
 
+        
         return encoder_optimizer
     else:
         print("Warning: No encoder layers found for finetuning")
@@ -308,14 +219,12 @@ class LatentDubinsEnv(gym.Env):
     Wraps the classic Gym-based DubinsEnv into a Gymnasium-compatible Env.
     Encodes observations into DINO-WM latent space and uses info['h'] as reward.
     """
-    def __init__(self, shared_wm=None, ckpt_dir: str = None, device: str = None, 
-                 with_proprio: bool = False, finetune_mode: bool = False):
+    def __init__(self, shared_wm=None, ckpt_dir: str = None, device: str = None, with_proprio: bool = False):
         super().__init__()
         # underlying Gym env
         self.env = DubinsEnv()
         self.device = torch.device(device) if device else torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.with_proprio = with_proprio
-        self.finetune_mode = finetune_mode
         
         # Use shared world model if provided, otherwise load new one
         if shared_wm is not None:
@@ -341,23 +250,8 @@ class LatentDubinsEnv(gym.Env):
         
         print("using proprio:", self.with_proprio)
         z = self._encode(obs)
-        
-        if self.finetune_mode:
-            # In finetune mode, we need to work with tensors
-            if torch.is_tensor(z):
-                obs_shape = z.shape
-            else:
-                obs_shape = z.shape
-                z = torch.from_numpy(z).to(self.device)
-                obs_shape = z.shape
-        else:
-            # In normal mode, convert to numpy
-            if torch.is_tensor(z):
-                z = z.detach().cpu().numpy()
-            obs_shape = z.shape
-        
-        print(f"Example latent state z shape: {obs_shape}")
-        self.observation_space = Box(low=-np.inf, high=np.inf, shape=obs_shape, dtype=np.float32)
+        print(f"Example latent state z shape: {z.shape}")
+        self.observation_space = Box(low=-np.inf, high=np.inf, shape=z.shape, dtype=np.float32)
         self.action_space = self.env.action_space
 
     def reset(self):
@@ -368,13 +262,7 @@ class LatentDubinsEnv(gym.Env):
         reset_out = self.env.reset()
         obs = reset_out[0] if isinstance(reset_out, tuple) else reset_out
         z = self._encode(obs)
-
-        # ✅ Always return CPU NumPy for compatibility with DummyVectorEnv
-        if torch.is_tensor(z):
-            z = z.detach().cpu().numpy()
-
         return z, {}
-
 
     def step(self, action):
         """
@@ -391,9 +279,6 @@ class LatentDubinsEnv(gym.Env):
         # override reward with safety metric
         h_s = info.get('h', 0.0) * 3 ##I multiplied by 3 to make HJ easier to learn
         z_next = self._encode(obs)
-        
-        if torch.is_tensor(z_next):
-            z_next = z_next.detach().cpu().numpy()
         return z_next, h_s, terminated, truncated, info
 
     def _encode(self, obs):
@@ -410,9 +295,8 @@ class LatentDubinsEnv(gym.Env):
         else:
             raise ValueError(f"Unexpected obs type: {type(obs)}")
         
-        # Use gradients if encoder is being finetuned or if we're in finetune mode
-        use_gradients = self.finetune_mode or any(p.requires_grad for p in self.wm.encoder.parameters())
-        context = torch.enable_grad() if use_gradients else torch.no_grad()
+        # Use gradients if encoder is being finetuned
+        context = torch.no_grad() if not any(p.requires_grad for p in self.wm.encoder.parameters()) else torch.enable_grad()
         
         with context:
             # prepare tensors
@@ -434,7 +318,7 @@ class LatentDubinsEnv(gym.Env):
             lat = self.wm.encode_obs(data)
             
             # flatten visual patches and concat proprio
-            if self.with_proprio:
+            if (self.with_proprio):
                 z_vis = lat['visual'].reshape(1, -1)  # (1, N_patches, E_dim) -> (1, N_patches*E_dim)
                 z_prop = lat['proprio']  # (1, D_prop)
                 
@@ -445,42 +329,16 @@ class LatentDubinsEnv(gym.Env):
                 
                 # Concatenate both visual and proprio embeddings
                 z = torch.cat([z_vis, z_prop], dim=-1)  # torch.Size([1, 75274])
-                z = z.squeeze(0)  # torch.size(75274,)
                 
-                # Only convert to numpy if not in finetune mode
-                if not self.finetune_mode:
-                    z = z.detach().cpu().numpy()
+                # Always convert to numpy, regardless of gradient mode
+                z = z.squeeze(0).detach().cpu().numpy()  # torch.size(75274,)
                 return z
             
             else:
                 z_vis = lat['visual'].reshape(1, -1)  # (1, N_patches * E_dim) torch.Size([1, 75264])
+                # Always convert to numpy, regardless of gradient mode
                 z_vis = z_vis.squeeze(0)
-                
-                # Only convert to numpy if not in finetune mode
-                if not self.finetune_mode:
-                    z_vis = z_vis.detach().cpu().numpy()
                 return z_vis
-
-
-class TensorAwareDDPGPolicy(avoid_DDPGPolicy_annealing):
-    """
-    Modified DDPG policy that can handle tensor observations for encoder finetuning.
-    """
-    
-    def __init__(self, *args, finetune_mode=False, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.finetune_mode = finetune_mode
-        
-    def process_fn(self, batch: Batch, buffer: TensorAwareReplayBuffer, indices: np.ndarray) -> Batch:
-        """Override process_fn to handle tensor observations properly"""
-        if self.finetune_mode:
-            # Ensure observations are tensors
-            if hasattr(batch, 'obs') and not torch.is_tensor(batch.obs):
-                batch.obs = torch.from_numpy(batch.obs).to(self.device)
-            if hasattr(batch, 'obs_next') and not torch.is_tensor(batch.obs_next):
-                batch.obs_next = torch.from_numpy(batch.obs_next).to(self.device)
-        
-        return super().process_fn(batch, buffer, indices)
 
 
 # Set up matplotlib config
@@ -502,11 +360,6 @@ def compute_hj_value(x, y, theta, policy, helper_env, args):
     # Set precise state without advancing dynamics
     obs_dict, _ = helper_env.env.reset(state=[x, y, theta])
     z0 = helper_env._encode(obs_dict)
-    
-    # Ensure z0 is numpy for this computation
-    if torch.is_tensor(z0):
-        z0 = z0.detach().cpu().numpy()
-    
     batch = Batch(obs=z0[None], info=Batch())
     a_old = policy(batch, model="actor_old").act
     q_val = policy.critic(batch.obs, a_old).cpu().item()
@@ -594,7 +447,10 @@ def main():
     # 2) Load shared world model once
     shared_wm = load_shared_world_model(args.dino_ckpt_dir, args.device)
     
-    # 3) init W&B + TB writer + logger
+    # 3) Setup encoder finetuning
+    encoder_optimizer = setup_encoder_finetuning(shared_wm, args)
+    
+    # 4) init W&B + TB writer + logger
     from datetime import datetime
     timestamp = datetime.now().strftime("%m%d_%H%M")
     wandb.init(
@@ -607,15 +463,18 @@ def main():
     wb_logger.load(writer)
     logger = wb_logger
 
-    # 4) Create environments with shared world model
+    # 5) Create environments with shared world model
     train_envs = DummyVectorEnv([
         lambda: LatentDubinsEnv(shared_wm=shared_wm, with_proprio=args.with_proprio)
         for _ in range(args.training_num)
     ])
     
-    # No test env needed since no testing loop
-    
-    # 5) extract shapes & max_action
+    test_envs = DummyVectorEnv([
+        lambda: LatentDubinsEnv(shared_wm=shared_wm, with_proprio=args.with_proprio)
+        for _ in range(args.test_num)
+    ])
+
+    # 6) extract shapes & max_action
     state_space  = train_envs.observation_space[0]
     action_space = train_envs.action_space[0]
     state_shape  = state_space.shape
@@ -624,7 +483,7 @@ def main():
                                 device=args.device,
                                 dtype=torch.float32)
 
-    # 6) build critic + actor
+    # 7) build critic + actor
     critic_net = Net(state_shape, action_shape,
                      hidden_sizes=args.critic_net,
                      activation=getattr(torch.nn, args.critic_activation),
@@ -644,7 +503,7 @@ def main():
                         device=args.device).to(args.device)
     actor_optim = torch.optim.AdamW(actor.parameters(), lr=args.actor_lr)
 
-    # 7) assemble your avoid‐DDPG policy
+    # 8) assemble your avoid‐DDPG policy
     policy = avoid_DDPGPolicy_annealing(
         critic=critic, critic_optim=critic_optim,
         tau=args.tau, gamma=args.gamma_pyhj,
@@ -656,48 +515,78 @@ def main():
         actor_gradient_steps=args.actor_gradient_steps,
     )
 
-    # 8) hook into policy.learn to capture losses
+    # 9) hook into policy.learn to capture losses and update encoder
     orig_learn = policy.learn
     policy.last_actor_loss  = 0.0
     policy.last_critic_loss = 0.0
+    policy.last_encoder_loss = 0.0
+    
     def learn_and_record(batch, **kw):
         metrics = orig_learn(batch, **kw)
         policy.last_actor_loss  = metrics["loss/actor"]
         policy.last_critic_loss = metrics["loss/critic"]
+        
+        # Update encoder if finetuning is enabled
+        if encoder_optimizer is not None:
+            # Compute encoder loss (use critic loss as proxy for encoder performance)
+            encoder_loss = policy.last_critic_loss
+            
+            # Backpropagate through encoder
+            encoder_optimizer.zero_grad()
+            encoder_loss.backward(retain_graph=True)
+            encoder_optimizer.step()
+            
+            policy.last_encoder_loss = float(encoder_loss)
+        
         return metrics
+    
     policy.learn = learn_and_record
 
-    # 9) define train_fn to log those to W&B
+    # 10) define train_fn to log those to W&B
     def train_fn(epoch: int, step_idx: int):
-        wandb.log({
+        log_dict = {
             "loss/actor":  policy.last_actor_loss,
             "loss/critic": policy.last_critic_loss,
-        })
+        }
+        
+        if encoder_optimizer is not None:
+            log_dict["loss/encoder"] = policy.last_encoder_loss
+            log_dict["finetune/learning_rate"] = encoder_optimizer.param_groups[0]['lr']
+        
+        wandb.log(log_dict)
 
-    # 10) collectors and replay buffer
+    # 11) collectors
     buffer          = VectorReplayBuffer(args.buffer_size, args.training_num)
     train_collector = Collector(policy, train_envs, buffer, exploration_noise=True)
-    print("collecting some initial data")
+    print("collecting some data first")
     train_collector.collect(10)
-    print("initial data collected")
+    print("done collecting some data first")
+    test_collector  = Collector(policy, test_envs)
 
-    # 11) choose headings & helper env (also uses shared model)
+    # 12) choose headings & helper env (also uses shared model)
     thetas = [0.0, np.pi/4, np.pi/2, 3*np.pi/4]
     helper_env = LatentDubinsEnv(shared_wm=shared_wm, with_proprio=args.with_proprio)
 
-    # 12) main training loop, 1 epoch at a time
+    # 13) training loop 
     log_path = Path(f"runs/ddpg_hj_latent/{args.dino_encoder}-{timestamp}")
     for epoch in range(1, args.total_episodes + 1):
         print(f"\n=== Epoch {epoch}/{args.total_episodes} ===")
 
+        # Set encoder to training mode if finetuning
+        if encoder_optimizer is not None:
+            shared_wm.encoder.train()
+        else:
+            shared_wm.encoder.eval()
+
+        # a) one epoch of offpolicy_trainer
         stats = offpolicy_trainer(
             policy=policy,
             train_collector=train_collector,
-            test_collector=None,  # no test loop
+            test_collector=None,  # test_collector,
             max_epoch=1,
             step_per_epoch=args.step_per_epoch,
             step_per_collect=args.step_per_collect,
-            episode_per_test=0,
+            episode_per_test=args.test_num,
             batch_size=args.batch_size_pyhj,
             update_per_step=args.update_per_step,
             stop_fn=lambda r: False,
@@ -706,42 +595,60 @@ def main():
             logger=logger,
         )
 
-        # Save policy checkpoint after each epoch
-        ckpt_dir = log_path / f"epoch_id_{epoch}"
-        ckpt_dir.mkdir(exist_ok=True, parents=True)
-        torch.save(policy.state_dict(), ckpt_dir / "policy.pth")
-
-        # Log other numeric stats to wandb
+        # b) log remaining numeric stats
         numeric = {}
         for k, v in stats.items():
-            if isinstance(v, (int, float)):
+            if isinstance(v, (int, float)): 
                 numeric[f"train/{k}"] = v
-            elif isinstance(v, np.generic):
+            elif isinstance(v, np.generic): 
                 numeric[f"train/{k}"] = float(v)
         wandb.log(numeric, step=epoch)
 
-        # Plot latent-space HJ filter & log to wandb
+        # c) save policy checkpoint (including encoder state if finetuning)
+        ckpt_dir = log_path / f"epoch_id_{epoch}"
+        ckpt_dir.mkdir(exist_ok=True, parents=True)
+        
+        # Save policy
+        torch.save(policy.state_dict(), ckpt_dir/"policy.pth")
+        
+        # Save encoder state if finetuning
+        if encoder_optimizer is not None:
+            torch.save({
+                'encoder_state_dict': shared_wm.encoder.state_dict(),
+                'encoder_optimizer_state_dict': encoder_optimizer.state_dict(),
+            }, ckpt_dir/"encoder_finetune.pth")
+
+        # d) plot latent‐space HJ filter & log
         try:
+            # Set encoder to eval mode for plotting
+            shared_wm.encoder.eval()
+            
             fig1, fig2 = plot_hj(policy, helper_env, thetas, args)
             wandb.log({
                 "HJ_latent/binary":     wandb.Image(fig1),
                 "HJ_latent/continuous": wandb.Image(fig2),
-            })
+            }, step=epoch)
             plt.close(fig1)
             plt.close(fig2)
-            print("plotted")
         except Exception as e:
             print(f"Error plotting HJ values: {e}")
 
     print("Training complete.")
 
-
 if __name__ == "__main__":
     main()
+    
+    
+    
+# Usage examples:
+# For fine-tuning with proprioception:
+# python "train_HJ_dubinslatent(can_fine_tune_PVR)2.py" --with_proprio --with_finetune --dino_encoder dino --finetune_lr 1e-5 --finetune_layers 3
 
+# For fine-tuning without proprioception:
+# python "train_HJ_dubinslatent(can_fine_tune_PVR)2.py" --with_finetune --dino_encoder r3m --finetune_lr 5e-6 --finetune_layers 2
 
+# For progressive unfreezing:
+# python "train_HJ_dubinslatent(can_fine_tune_PVR)2.py" --with_finetune --progressive_unfreezing --unfreeze_schedule "25,50,75" --dino_encoder vc1
 
-# python "train_HJ_dubinslatent(can_fine_tune_PVR)4.py" --with_finetune --dino_encoder r3m --finetune_lr 5e-6 --finetune_layers 2 --step-per-epoch 100 --nx 20 --ny 20
-# python "train_HJ_dubinslatent(can_fine_tune_PVR)4.py" --step-per-epoch 100 --dino_encoder r3m --nx 20 --ny 20
-
-python "train_HJ_dubinslatent(can_fine_tune_PVR)4.py" --with_finetune --dino_encoder r3m --finetune_lr 5e-6 --finetune_layers 2 --step-per-epoch 1000  --nx 20 --ny 20 --total-episodes 50 --seed 0
+# For comparison without fine-tuning:
+# python "train_HJ_dubinslatent(can_fine_tune_PVR)2.py" --dino_encoder dino

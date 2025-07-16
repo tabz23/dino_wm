@@ -3,7 +3,7 @@ import numpy as np
 from pathlib import Path
 from einops import rearrange
 from typing import Callable, Optional
-from traj_dset import TrajDataset, TrajSlicerDataset, get_train_val_sliced, split_traj_datasets
+from datasets.traj_dset import TrajDataset, TrajSlicerDataset, get_train_val_sliced, split_traj_datasets
 
 
 class CarlaDataset(TrajDataset):
@@ -74,7 +74,7 @@ class CarlaDataset(TrajDataset):
 
     def get_frames(self, idx, frames):
         obs_file = self.data_path / "obses" / f"episode_{int(idx):03d}.pth"
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+        device = "cpu"
         images = torch.load(obs_file, map_location=device)
         images = images.float() / 255.0
         images = rearrange(images, "T H W C -> T C H W")
@@ -118,18 +118,24 @@ class CarlaDataset(TrajDataset):
         return data_mean, data_std
         
 def load_carla_slice_train_val(
+        transform,
         data_path,
         n_rollout = 50,
         normalize_action = True,
+        normalize_states = True,
         split_ratio = 0.8,
         num_hist = 0,
         num_pred = 0,
         frameskip = 0,
+        with_costs = True,
 ):
     dset = CarlaDataset(
         data_path=data_path,
+        transform=transform,
         normalize_action=normalize_action,
+        normalize_states=normalize_states,
         n_rollout=n_rollout,
+        with_costs=with_costs
     )
     
     dset_train, dset_val, train_slices, val_slices = get_train_val_sliced(

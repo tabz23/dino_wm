@@ -142,7 +142,7 @@ critic-net: [128, 128, 128]  # type=int, nargs='*', default=None) # for critic n
 # control-net: [256, 256, 256] # type=int, nargs='*', default=None) # for control policy
 # critic-net: [256, 256, 256]  # type=int, nargs='*', default=None) # for critic net
 training-num: 3 # type=int, default=8)
-test-num: 2 # type=int, default=100)
+test-num: 1 # type=int, default=100)
 render: 0. # type=float, default=0.)
 rew-norm: False # action="store_true", default=False)
 n-step: 1 # type=int, default=1)

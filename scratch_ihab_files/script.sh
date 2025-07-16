@@ -45,7 +45,7 @@ python -m accelerate.commands.launch train.py --config-name "train copy.yaml" en
 ###### HERE 
 export LSF_DOCKER_VOLUMES="/storage1/fs1/sibai/Active:/storage1/fs1/sibai/Active" 
 export LSF_DOCKER_SHM_SIZE='64g'  
-bsub -n 10 -Is -q general-interactive -R 'rusage[mem=102GB]' -M 100GB -R 'gpuhost' -gpu "num=1:gmem=30G"  -a 'docker(continuumio/anaconda3:2021.11)'  /bin/bash 
+bsub -n 16 -Is -q general-interactive -R 'rusage[mem=102GB]' -M 100GB -R 'gpuhost' -gpu "num=1:gmem=31G"  -a 'docker(continuumio/anaconda3:2021.11)'  /bin/bash 
 # bsub -n 12 -Is -q general-interactive -R 'rusage[mem=32GB]' -M 30 -R 'gpuhost' -gpu "num=1:gmem=10G"  -a 'docker(continuumio/anaconda3:2021.11)'  /bin/bash 
 # bsub -n 12 -Is -q general-interactive -R 'rusage[mem=32GB]' -M 30 -R 'gpuhost' -gpu "num=1:gmem=10G" -a 'docker(nvidia/cuda:11.8.0-base-ubuntu22.04)' /bin/bash
 # bsub -n 12 -Is -q general-interactive -R 'rusage[mem=32GB]' -M 30 -R 'gpuhost' -gpu "num=1:gmem=1G" -a 'docker(nvcr.io/nvidia/pytorch:23.10-py3)' /bin/bash
@@ -56,7 +56,8 @@ export PATH="/opt/conda/bin:$PATH" \
 export NETRC=/storage1/fs1/sibai/Active/ihab/tmp/.netrc \
 export DATASET_DIR=/storage1/fs1/sibai/Active/ihab/research_new/datasets_dino \
 export TORCH_HOME=/storage1/fs1/sibai/Active/ihab/tmp/torch \
-export WANDB_CONFIG_DIR=/storage1/fs1/sibai/Active/ihab/tmp/.config  
+export WANDB_CONFIG_DIR=/storage1/fs1/sibai/Active/ihab/tmp/.config\
+export WANDB_API_KEY=93327b636baa6f7173f93e1e15367cbab6048421
 
 # export TMPDIR=/storage1/fs1/sibai/Active/ihab/tmp \
 bhosts -w general-interactive -gpu

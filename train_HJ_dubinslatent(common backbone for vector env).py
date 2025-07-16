@@ -64,7 +64,7 @@ def get_args_and_merge_config():
     
     parser.add_argument(
         "--dino_encoder", type=str, default="dino",
-        help="Which encoder to use: dino, r3m, vc1, etc."
+        help="Which encoder to use: dino, r3m, vc1, resnet, dino_cls."
     )
 
     
@@ -399,7 +399,14 @@ def main():
     policy.last_actor_loss  = 0.0
     policy.last_critic_loss = 0.0
     def learn_and_record(batch, **kw):
-        metrics = orig_learn(batch, **kw)
+        if args.with_finetune and encoder_optim is not None:
+            encoder_optim.zero_grad()
+
+        metrics = orig_learn(batch, **kw)  # actor + critic do backward internally
+
+        if args.with_finetune and encoder_optim is not None:
+            encoder_optim.step()  # apply gradient update to encoder
+
         policy.last_actor_loss  = metrics["loss/actor"]
         policy.last_critic_loss = metrics["loss/critic"]
         return metrics

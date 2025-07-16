@@ -438,4 +438,4 @@ if __name__ == "__main__":
     main()
     
     
-# python "/storage1/fs1/sibai/Active/ihab/research_new/dino_wm/train_HJ7.py" --dino_ckpt_dir "/storage1/fs1/sibai/Active/ihab/research_new/checkpt_dino/outputs/dubins/fully trained(prop repeated 3 times)" --config train_HJ_configs.yaml --dino_encoder vc1 --with_finetune --encoder_lr 1e-5 --nx --ny 20
+# python "/storage1/fs1/sibai/Active/ihab/research_new/dino_wm/trainHJ_dubinslatent(canfinetunepvr)7.py" --dino_ckpt_dir "/storage1/fs1/sibai/Active/ihab/research_new/checkpt_dino/outputs/dubins/fully trained(prop repeated 3 times)" --config train_HJ_configs.yaml --dino_encoder r3m --with_finetune --encoder_lr 1e-5

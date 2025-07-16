@@ -594,7 +594,7 @@ def plot_hj(policy, helper_env, thetas, args):
                     # Print progress for debugging
                     print(f"Computing HJ value at x={x:.2f}, y={y:.2f}, theta={theta:.2f}")
                     
-                    # Verify device consistency before computation
+                    #Verify device consistency before computation
                     print(f"Policy device - actor_old: {next(policy.actor_old.parameters()).device}")
                     print(f"Policy device - critic: {next(policy.critic.parameters()).device}")
                     
@@ -738,7 +738,7 @@ def main():
     )
 
     # 9) Create tensor-aware buffer
-    buffer          = buffer = TensorAwareReplayBuffer(
+    buffer     = TensorAwareReplayBuffer(
         size=args.buffer_size,
         buffer_num=args.training_num,
         device=args.device,
@@ -784,13 +784,13 @@ def main():
         """Custom trainer that handles encoder finetuning"""
         
         # Pre-collect random samples
-        train_collector.collect(n_step=args.buffer_size // 10, random=True)
+        train_collector.collect(n_step=args.buffer_size // 10, random=True,no_grad=False)
         
         global_step = 0
         
         for epoch in range(max_epoch):
             # Collect training data
-            collect_result = train_collector.collect(n_step=step_per_collect)
+            collect_result = train_collector.collect(n_step=step_per_collect, no_grad=False)
             global_step += step_per_collect
             
             # Update policy
@@ -805,31 +805,31 @@ def main():
                             logger.log_scalar(f"train/{key}", value, global_step)
             
             # Test policy
-            if epoch % args.test_interval == 0:
-                test_result = test_collector.collect(n_episode=test_num)
+            # if epoch % args.test_interval == 0:
+            #     test_result = test_collector.collect(n_episode=test_num)
                 
-                # Log test results
-                if logger is not None:
-                    logger.log_scalar("test/reward", test_result['rews'].mean(), global_step)
-                    logger.log_scalar("test/length", test_result['lens'].mean(), global_step)
+            #     # Log test results
+            #     if logger is not None:
+            #         logger.log_scalar("test/reward", test_result['rews'].mean(), global_step)
+            #         logger.log_scalar("test/length", test_result['lens'].mean(), global_step)
                 
-                print(f"Epoch {epoch}: test_reward={test_result['rews'].mean():.3f}, "
-                      f"test_length={test_result['lens'].mean():.1f}")
+            #     print(f"Epoch {epoch}: test_reward={test_result['rews'].mean():.3f}, "
+            #           f"test_length={test_result['lens'].mean():.1f}")
                 
-                # Plot HJ values periodically
-                if epoch % args.plot_interval == 0:
-                    thetas = [0.0, np.pi/4, np.pi/2, 3*np.pi/4]
-                    fig1, fig2 = plot_hj(policy, helper_env, thetas, args)
-                    
-                    # Log plots to wandb
-                    wandb.log({
-                        f"hj_safe_mask_epoch_{epoch}": wandb.Image(fig1),
-                        f"hj_values_epoch_{epoch}": wandb.Image(fig2)
-                    })
-                    
-                    plt.close(fig1)
-                    plt.close(fig2)
-        
+            # Plot HJ values periodically
+            # if epoch % args.plot_interval == 0:
+            thetas = [0.0, np.pi/4, np.pi/2, 3*np.pi/4]
+            fig1, fig2 = plot_hj(policy, helper_env, thetas, args)
+            
+            # Log plots to wandb
+            wandb.log({
+                f"hj_safe_mask_epoch_{epoch}": wandb.Image(fig1),
+                f"hj_values_epoch_{epoch}": wandb.Image(fig2)
+            })
+            
+            plt.close(fig1)
+            plt.close(fig2)
+    
         return policy
 
     # 14) Run training
@@ -884,7 +884,7 @@ def main():
     plt.close(fig2)
     
     # 16) Save model
-    ckpt_dir = f"runs/ddpg_hj_latent/{run_name}/epoch_id_{epoch}"
+    ckpt_dir = f"runs/ddpg_hj_latent/{run_name}/final"
     model_save_path = ckpt_dir
     os.makedirs("models", exist_ok=True)
     torch.save({
@@ -905,10 +905,12 @@ def main():
 if __name__ == "__main__":
     main()
     
-# python "/storage1/fs1/sibai/Active/ihab/research_new/dino_wm/train_HJ_dubinslatent(can_fine_tune_PVR)5.py" \
-#     --dino_ckpt_dir "/storage1/fs1/sibai/Active/ihab/research_new/checkpt_dino/outputs/dubins/fully trained(prop repeated 3 times)" \
-#     --config train_HJ_configs.yaml \
-#     --with_proprio \
-#     --dino_encoder dino \
-#     --with_finetune \
-#     --encoder_lr 1e-5
+    # python "/storage1/fs1/sibai/Active/ihab/research_new/dino_wm/train_HJ_dubinslatent(can_fine_tune_PVR)5.py" \
+    # --dino_ckpt_dir "/storage1/fs1/sibai/Active/ihab/research_new/checkpt_dino/outputs/dubins/fully trained(prop repeated 3 times)" \
+    # --config train_HJ_configs.yaml \
+    # --dino_encoder r3m \
+    # --with_finetune \
+    # --encoder_lr 1e-5 \
+    # --total-episodes 100000
+    # --step-per-epoch 1000
+    
