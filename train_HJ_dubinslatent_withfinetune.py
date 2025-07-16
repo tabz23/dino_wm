@@ -11,6 +11,10 @@ import matplotlib.pyplot as plt
 import wandb
 from datetime import datetime
 from copy import deepcopy
+from tqdm import tqdm
+import torch.nn.functional as F
+from concurrent.futures import ThreadPoolExecutor
+import functools
 
 # Load DINO-WM via plan.load_model
 from plan import load_model
@@ -104,8 +108,11 @@ class RawDubinsEnv(gym.Env):
         self.observation_space = self.env.observation_space
         self.action_space = self.env.action_space
 
-    def reset(self):
-        reset_out = self.env.reset()
+    def reset(self, state=None):
+        if state is not None:
+            reset_out = self.env.reset(state=state)
+        else:
+            reset_out = self.env.reset()
         obs = reset_out[0] if isinstance(reset_out, tuple) else reset_out
         return obs, {}
 
@@ -117,77 +124,159 @@ class RawDubinsEnv(gym.Env):
         h_s = info.get('h', 0.0) * 3  # Multiply by 3 to make HJ easier to learn
         return obs, h_s, terminated, truncated, info
 
-class CustomReplayBuffer:
-    def __init__(self, size: int, device: str):
+class OptimizedReplayBuffer:
+    """Optimized replay buffer using pre-allocated tensors"""
+    def __init__(self, size: int, device: str, obs_example, action_dim):
         self.size = size
         self.device = torch.device(device)
-        self.buffer = []
         self.position = 0
+        self.filled = 0
+        
+        # Extract dimensions from example observation
+        if isinstance(obs_example, dict):
+            visual_shape = obs_example['visual'].shape
+            proprio_dim = obs_example['proprio'].shape[0]
+        else:
+            visual_shape = obs_example[0].shape
+            proprio_dim = obs_example[1].shape[0]
+        
+        # Pre-allocate tensors on CPU to save GPU memory
+        h, w, c = visual_shape
+        # Store large visual buffers on CPU
+        self.visual_buffer = torch.zeros((size, c, h, w), dtype=torch.float32, device='cpu')
+        self.next_visual_buffer = torch.zeros((size, c, h, w), dtype=torch.float32, device='cpu')
+        
+        # Keep smaller tensors on GPU for faster access
+        self.proprio_buffer = torch.zeros((size, proprio_dim), dtype=torch.float32, device=self.device)
+        self.action_buffer = torch.zeros((size, action_dim), dtype=torch.float32, device=self.device)
+        self.reward_buffer = torch.zeros((size, 1), dtype=torch.float32, device=self.device)
+        self.next_proprio_buffer = torch.zeros((size, proprio_dim), dtype=torch.float32, device=self.device)
+        self.done_buffer = torch.zeros((size, 1), dtype=torch.float32, device=self.device)
 
     def add(self, obs, act, rew, obs_next, done):
-        data = (obs, act, rew, obs_next, done)
-        if len(self.buffer) < self.size:
-            self.buffer.append(data)
-        else:
-            self.buffer[self.position] = data
-        self.position = (self.position + 1) % self.size
-
-    def sample(self, batch_size: int):
-        indices = np.random.choice(len(self.buffer), batch_size, replace=False)
-        obs_batch = [self.buffer[i][0] for i in indices]
-        act_batch = [self.buffer[i][1] for i in indices]
-        rew_batch = [self.buffer[i][2] for i in indices]
-        obs_next_batch = [self.buffer[i][3] for i in indices]
-        done_batch = [self.buffer[i][4] for i in indices]
-        return obs_batch, act_batch, rew_batch, obs_next_batch, done_batch
-
-    def __len__(self):
-        return len(self.buffer)
-
-def encode_batch(obs_batch, wm, device, with_proprio, requires_grad=False):
-    visual_batch = []
-    proprio_batch = []
-    for obs in obs_batch:
+        # Extract visual and proprio
         if isinstance(obs, dict):
             visual = obs['visual']
             proprio = obs['proprio']
-        elif isinstance(obs, (tuple, list)) and len(obs) == 2:
-            visual, proprio = obs
         else:
-            raise ValueError(f"Unexpected obs type: {type(obs)}")
-        visual_np = np.transpose(visual, (2, 0, 1)).astype(np.float32) / 255.0
-        vis_t = torch.from_numpy(visual_np).unsqueeze(0).unsqueeze(1).to(device)
-        prop_t = torch.from_numpy(proprio).unsqueeze(0).unsqueeze(1).to(device)
-        visual_batch.append(vis_t)
-        proprio_batch.append(prop_t)
-    visual_batch = torch.cat(visual_batch, dim=0)
-    proprio_batch = torch.cat(proprio_batch, dim=0)
+            visual, proprio = obs
+            
+        if isinstance(obs_next, dict):
+            visual_next = obs_next['visual']
+            proprio_next = obs_next['proprio']
+        else:
+            visual_next, proprio_next = obs_next
+        
+        # Convert and store directly in pre-allocated tensors
+        self.visual_buffer[self.position] = torch.from_numpy(
+            np.transpose(visual, (2, 0, 1)).astype(np.float32) / 255.0
+        )
+        self.proprio_buffer[self.position] = torch.from_numpy(proprio.astype(np.float32))
+        self.action_buffer[self.position] = torch.from_numpy(act.astype(np.float32))
+        self.reward_buffer[self.position] = rew
+        self.next_visual_buffer[self.position] = torch.from_numpy(
+            np.transpose(visual_next, (2, 0, 1)).astype(np.float32) / 255.0
+        )
+        self.next_proprio_buffer[self.position] = torch.from_numpy(proprio_next.astype(np.float32))
+        self.done_buffer[self.position] = float(done)
+        
+        self.position = (self.position + 1) % self.size
+        self.filled = min(self.filled + 1, self.size)
+
+    def sample(self, batch_size: int):
+        indices = torch.randint(0, self.filled, (batch_size,))
+        
+        # Move visual data to GPU during sampling
+        visual_batch = self.visual_buffer[indices].to(self.device)
+        next_visual_batch = self.next_visual_buffer[indices].to(self.device)
+        
+        return (
+            (visual_batch, self.proprio_buffer[indices]),
+            self.action_buffer[indices],
+            self.reward_buffer[indices],
+            (next_visual_batch, self.next_proprio_buffer[indices]),
+            self.done_buffer[indices]
+        )
+
+    def __len__(self):
+        return self.filled
+
+def encode_batch_optimized(obs_batch, wm, device, with_proprio, requires_grad=False):
+    """Optimized batch encoding - expects pre-processed tensors"""
+    if isinstance(obs_batch, tuple):
+        visual_batch, proprio_batch = obs_batch
+    else:
+        # Legacy path for list of observations
+        visual_list = []
+        proprio_list = []
+        for obs in obs_batch:
+            if isinstance(obs, dict):
+                visual = obs['visual']
+                proprio = obs['proprio']
+            else:
+                visual, proprio = obs
+            visual_np = np.transpose(visual, (2, 0, 1)).astype(np.float32) / 255.0
+            visual_list.append(torch.from_numpy(visual_np))
+            proprio_list.append(torch.from_numpy(proprio))
+        visual_batch = torch.stack(visual_list).to(device)
+        proprio_batch = torch.stack(proprio_list).to(device)
+    
+    # Add time dimension
+    visual_batch = visual_batch.unsqueeze(1)
+    proprio_batch = proprio_batch.unsqueeze(1)
+    
     data = {'visual': visual_batch, 'proprio': proprio_batch}
+    
     if requires_grad:
         lat = wm.encode_obs(data)
     else:
         with torch.no_grad():
             lat = wm.encode_obs(data)
+    
     if with_proprio:
         z_vis = lat['visual'].reshape(lat['visual'].shape[0], -1)
         z_prop = lat['proprio'].squeeze(1)
         z = torch.cat([z_vis, z_prop], dim=-1)
     else:
         z = lat['visual'].reshape(lat['visual'].shape[0], -1)
+    
     return z
 
-def compute_hj_value(x, y, theta, policy, helper_env, wm, device, args):
-    obs_dict, _ = helper_env.env.reset(state=[x, y, theta])
-    z = encode_batch([obs_dict], wm, device, args.with_proprio, requires_grad=False)
-    z = z.to(device)
-    with torch.no_grad():
-        a_old = policy.actor_old(z)
-        q_val = policy.critic(z, a_old).item()
-    return q_val
-
-def plot_hj(policy, helper_env, wm, thetas, args, device):
+def compute_hj_grid_vectorized(policy, helper_env, wm, theta, args, device):
+    """Vectorized computation of HJ values for a grid at fixed theta"""
     xs = np.linspace(args.x_min, args.x_max, args.nx)
     ys = np.linspace(args.y_min, args.y_max, args.ny)
+    
+    # Create grid of states
+    xx, yy = np.meshgrid(xs, ys, indexing='ij')
+    states = np.stack([xx.ravel(), yy.ravel(), np.full(args.nx * args.ny, theta)], axis=1)
+    
+    # Batch process observations
+    obs_list = []
+    for state in states:
+        obs_dict, _ = helper_env.env.reset(state=state)
+        obs_list.append(obs_dict)
+    
+    # Process in larger batches
+    batch_size = min(256, len(obs_list))  # Adjust based on GPU memory
+    all_values = []
+    
+    with torch.no_grad():
+        for i in range(0, len(obs_list), batch_size):
+            batch = obs_list[i:i+batch_size]
+            z = encode_batch_optimized(batch, wm, device, args.with_proprio, requires_grad=False)
+            a = policy.actor_old(z)
+            q_vals = policy.critic(z, a).squeeze(-1)
+            all_values.append(q_vals.cpu().numpy())
+    
+    values = np.concatenate(all_values).reshape(args.nx, args.ny)
+    return values
+
+def plot_hj_optimized(policy, helper_env, wm, thetas, args, device):
+    """Optimized HJ plotting using vectorized computation"""
+    xs = np.linspace(args.x_min, args.x_max, args.nx)
+    ys = np.linspace(args.y_min, args.y_max, args.ny)
+    
     if len(thetas) == 1:
         fig1, axes1 = plt.subplots(1, 1, figsize=(6, 6))
         fig2, axes2 = plt.subplots(1, 1, figsize=(6, 6))
@@ -196,11 +285,10 @@ def plot_hj(policy, helper_env, wm, thetas, args, device):
     else:
         fig1, axes1 = plt.subplots(len(thetas), 1, figsize=(6, 6*len(thetas)))
         fig2, axes2 = plt.subplots(len(thetas), 1, figsize=(6, 6*len(thetas)))
+    
     for i, theta in enumerate(thetas):
-        vals = np.zeros((args.nx, args.ny), dtype=np.float32)
-        for ix, x in enumerate(xs):
-            for iy, y in enumerate(ys):
-                vals[ix, iy] = compute_hj_value(x, y, theta, policy, helper_env, wm, device, args)
+        vals = compute_hj_grid_vectorized(policy, helper_env, wm, theta, args, device)
+        
         axes1[i].imshow(
             (vals.T > 0),
             extent=(args.x_min, args.x_max, args.y_min, args.y_max),
@@ -210,6 +298,7 @@ def plot_hj(policy, helper_env, wm, thetas, args, device):
         axes1[i].set_title(f"θ={theta:.2f} (safe mask)")
         axes1[i].set_xlabel("x")
         axes1[i].set_ylabel("y")
+        
         im = axes2[i].imshow(
             vals.T,
             extent=(args.x_min, args.x_max, args.y_min, args.y_max),
@@ -220,6 +309,7 @@ def plot_hj(policy, helper_env, wm, thetas, args, device):
         axes2[i].set_xlabel("x")
         axes2[i].set_ylabel("y")
         fig2.colorbar(im, ax=axes2[i])
+    
     fig1.tight_layout()
     fig2.tight_layout()
     return fig1, fig2
@@ -255,7 +345,7 @@ class Critic(torch.nn.Module):
         for hidden_dim in hidden_sizes:
             layers.append(torch.nn.Linear(prev_dim, hidden_dim))
             layers.append(getattr(torch.nn, activation)())
-            prev_dim =hidden_dim
+            prev_dim = hidden_dim
         layers.append(torch.nn.Linear(prev_dim, output_dim))
         return torch.nn.Sequential(*layers)
 
@@ -263,7 +353,7 @@ class Critic(torch.nn.Module):
         return self.net(torch.cat([state, action], dim=-1))
 
 class AvoidDDPGPolicy:
-    def __init__(self, actor, actor_optim, critic, critic_optim, tau, gamma, exploration_noise, device,with_proprio):
+    def __init__(self, actor, actor_optim, critic, critic_optim, tau, gamma, exploration_noise, device, with_proprio):
         self.actor = actor
         self.actor_optim = actor_optim
         self.actor_old = deepcopy(actor)
@@ -274,8 +364,8 @@ class AvoidDDPGPolicy:
         self.gamma = gamma
         self.exploration_noise = exploration_noise
         self.device = device
-        self.actor_gradient_steps = 5  # Consistent with original policy
-        self.with_proprio=with_proprio
+        self.actor_gradient_steps = 5
+        self.with_proprio = with_proprio
 
     def train(self):
         self.actor.train()
@@ -285,46 +375,50 @@ class AvoidDDPGPolicy:
         self.actor.eval()
         self.critic.eval()
 
+    @torch.no_grad()
     def sync_weight(self):
+        """Optimized weight synchronization using in-place operations"""
         for target_param, param in zip(self.actor_old.parameters(), self.actor.parameters()):
-            target_param.data.copy_(self.tau * param.data + (1 - self.tau) * target_param.data)
+            target_param.mul_(1 - self.tau).add_(param.data, alpha=self.tau)
         for target_param, param in zip(self.critic_old.parameters(), self.critic.parameters()):
-            target_param.data.copy_(self.tau * param.data + (1 - self.tau) * target_param.data)
+            target_param.mul_(1 - self.tau).add_(param.data, alpha=self.tau)
 
     def learn(self, batch, wm, with_finetune, encoder_optim):
         obs_batch, act_batch, rew_batch, obs_next_batch, done_batch = batch
         requires_grad = with_finetune
-        z = encode_batch(obs_batch, wm, self.device, self.with_proprio, requires_grad=requires_grad)
-        z_next = encode_batch(obs_next_batch, wm, self.device, self.with_proprio, requires_grad=requires_grad)
-        act = torch.tensor(act_batch, dtype=torch.float32, device=self.device)
-        rew = torch.tensor(rew_batch, dtype=torch.float32, device=self.device).unsqueeze(1)
+        
+        # Encode current and next states
+        z = encode_batch_optimized(obs_batch, wm, self.device, self.with_proprio, requires_grad=requires_grad)
+        z_next = encode_batch_optimized(obs_next_batch, wm, self.device, self.with_proprio, requires_grad=requires_grad)
+        
+        # Actions and rewards are already tensors from OptimizedReplayBuffer
+        act = act_batch
+        rew = rew_batch
 
         # Critic loss
         with torch.no_grad():
             a_next = self.actor_old(z_next)
             target_q = self.critic_old(z_next, a_next)
             target_q = self.gamma * torch.minimum(rew, target_q) + (1 - self.gamma) * rew
+        
         current_q = self.critic(z, act)
-        critic_loss = torch.nn.functional.mse_loss(current_q, target_q)
+        critic_loss = F.mse_loss(current_q, target_q)
 
         # Backprop critic loss
         self.critic_optim.zero_grad()
         if with_finetune:
             encoder_optim.zero_grad()
+        
         critic_loss.backward()
         self.critic_optim.step()
+        
+        grad_norm = 0.0
         if with_finetune:
-            # Compute gradient norm to verify fine-tuning
-            grad_norm = 0.0
-            for param in wm.parameters():
-                if param.grad is not None:
-                    grad_norm += param.grad.data.norm(2).item() ** 2
-            grad_norm = grad_norm ** 0.5
+            # Compute gradient norm more efficiently
+            grad_norm = torch.nn.utils.clip_grad_norm_(wm.parameters(), max_norm=float('inf'))
             encoder_optim.step()
-        else:
-            grad_norm = 0.0
 
-        # Actor loss with detached z to prevent backprop through encoder
+        # Actor loss with detached z
         z_detached = z.detach()
         a = self.actor(z_detached)
         actor_loss = -self.critic(z_detached, a).mean()
@@ -341,6 +435,78 @@ class AvoidDDPGPolicy:
             "loss/critic": critic_loss.item(),
             "grad_norm": grad_norm if with_finetune else 0.0
         }
+
+class ParallelEnvCollector:
+    """Collects trajectories from multiple environments in parallel"""
+    def __init__(self, envs, policy, shared_wm, device, with_proprio, exploration_noise):
+        self.envs = envs
+        self.policy = policy
+        self.shared_wm = shared_wm
+        self.device = device
+        self.with_proprio = with_proprio
+        self.exploration_noise = exploration_noise
+        self.num_envs = len(envs)
+        
+class ParallelEnvCollector:
+    """Collects a fixed number of transitions from multiple envs in parallel"""
+    def __init__(self, envs, policy, shared_wm, device, with_proprio, exploration_noise):
+        self.envs = envs
+        self.policy = policy
+        self.shared_wm = shared_wm
+        self.device = device
+        self.with_proprio = with_proprio
+        self.exploration_noise = exploration_noise
+        self.num_envs = len(envs)
+
+    def collect_trajectories(self, buffer, max_steps: int=1000):
+        """
+        Collect up to `max_steps` transitions across all envs.
+        Stops early if you reach max_steps.
+        """
+        # 1) Reset all envs and keep their latest obs
+        obs_list = [env.reset()[0] for env in self.envs]
+        done_flags = [False] * self.num_envs
+        steps = 0
+
+        while steps < max_steps:
+            # 2) which envs are still active?
+            active_idxs = [i for i, d in enumerate(done_flags) if not d]
+            if not active_idxs:
+                # all envs done → reset them if you want continuous data
+                for i in range(self.num_envs):
+                    obs_list[i] = self.envs[i].reset()[0]
+                    done_flags[i] = False
+                continue
+
+            # 3) batch‑encode only active observations
+            active_obs = [obs_list[i] for i in active_idxs]
+            z = encode_batch_optimized(active_obs,
+                                       self.shared_wm,
+                                       self.device,
+                                       self.with_proprio,
+                                       requires_grad=False)
+            with torch.no_grad():
+                actions = self.policy.actor(z).cpu().numpy()
+
+            # 4) optionally add noise
+            if np.random.rand() < self.exploration_noise:
+                actions = np.random.uniform(-1, 1, actions.shape)
+
+            # 5) step each active env and store transitions
+            for idx, env_idx in enumerate(active_idxs):
+                env = self.envs[env_idx]
+                action = actions[idx]
+                obs_next, rew, terminated, truncated, info = env.step(action)
+                done = terminated or truncated
+
+                buffer.add(obs_list[env_idx], action, rew, obs_next, done)
+                steps += 1
+                obs_list[env_idx] = obs_next
+                done_flags[env_idx] = done
+
+                if steps >= max_steps:
+                    break
+
 
 def main():
     args = get_args_and_merge_config()
@@ -364,31 +530,32 @@ def main():
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
+    # Enable cuDNN autotuner for better performance
+    if device == 'cuda':
+        torch.backends.cudnn.benchmark = True
+
     shared_wm = load_shared_world_model(args.dino_ckpt_dir, device)
     if args.with_finetune:
-        # 1) allow its training mode
         shared_wm.train_encoder = True
-        # 2) make sure parameters are unfrozen
         for p in shared_wm.parameters():
             p.requires_grad = True
         shared_wm.train()
     else:
         shared_wm.train_encoder = False
-        shared_wm.eval()
-
-            
-    if args.with_finetune:
-    # enable gradient tracking on *all* wm params
         for p in shared_wm.parameters():
-            p.requires_grad = True
+            p.requires_grad = False
+        shared_wm.eval()
 
     train_envs = [RawDubinsEnv(device=device, with_proprio=args.with_proprio) for _ in range(args.training_num)]
     test_envs = [RawDubinsEnv(device=device, with_proprio=args.with_proprio) for _ in range(args.test_num)]
 
-    state_dim = encode_batch([train_envs[0].reset()[0]], shared_wm, device, args.with_proprio, requires_grad=False).shape[1]
+    # Get dimensions
+    dummy_obs, _ = train_envs[0].reset()
+    state_dim = encode_batch_optimized([dummy_obs], shared_wm, device, args.with_proprio, requires_grad=False).shape[1]
     action_dim = train_envs[0].action_space.shape[0]
     max_action = torch.tensor(train_envs[0].action_space.high, device=device, dtype=torch.float32)
 
+    # Initialize networks
     actor = Actor(state_dim, action_dim, args.control_net, args.actor_activation, max_action).to(device)
     critic = Critic(state_dim, action_dim, args.critic_net, args.critic_activation).to(device)
 
@@ -412,11 +579,17 @@ def main():
         with_proprio=args.with_proprio
     )
 
-    buffer = CustomReplayBuffer(args.buffer_size, device)
+    # Use optimized replay buffer
+    buffer = OptimizedReplayBuffer(args.buffer_size, device, dummy_obs, action_dim)
+
+    # Initialize parallel collector
+    collector = ParallelEnvCollector(train_envs, policy, shared_wm, device, 
+                                   args.with_proprio, args.exploration_noise)
 
     timestamp = datetime.now().strftime("%m%d_%H%M")
     log_dir = Path(f"runs/ddpg_hj_latent/{args.dino_encoder}-{timestamp}/")
     log_dir.mkdir(parents=True, exist_ok=True)
+    
     wandb.init(
         project=f"ddpg-hj-latent-dubins",
         name=f"ddpg-{args.dino_encoder}-{timestamp}",
@@ -427,58 +600,39 @@ def main():
     thetas = [0.0, np.pi/4, np.pi/2, 3*np.pi/4]
     helper_env = RawDubinsEnv(device=device, with_proprio=args.with_proprio)
 
+    # Warm up buffer more efficiently
+    print(f"Warming up replay buffer (need ≥ {args.batch_size_pyhj} samples)...")
+    while len(buffer) < 5000:
+        collector.collect_trajectories(buffer)
+    print(f"Replay buffer: {len(buffer)} samples.")
+
     for epoch in range(1, args.total_episodes + 1):
         print(f"\n=== Epoch {epoch}/{args.total_episodes} ===")
         
-        while len(buffer) < args.batch_size_pyhj:
-            print(f"Warming up replay buffer (need ≥ {args.batch_size_pyhj} samples)...")
-            for env in train_envs:
-                obs, _ = env.reset()
-                done = False
-                while not done and len(buffer) < 10*args.batch_size_pyhj:
-                    # random action in [-1,1]^action_dim
-                    act = np.random.uniform(-1, 1, size=action_dim)
-                    obs_next, rew, terminated, truncated, _ = env.step(act)
-                    buffer.add(obs, act, rew, obs_next, terminated or truncated)
-                    obs = obs_next
-            print(f"Replay buffer: {len(buffer)} samples.")
-        # Collect data
-        for env in train_envs:
-            obs, _ = env.reset()
-            done = False
-            while not done:
-                z = encode_batch([obs], shared_wm, device, args.with_proprio, requires_grad=False)
-                with torch.no_grad():
-                    act = policy.actor(z).cpu().numpy().flatten()
-                if np.random.rand() < args.exploration_noise:
-                    act = np.random.uniform(-1, 1, act.shape)
-                obs_next, rew, terminated, truncated, _ = env.step(act)
-                done = terminated or truncated
-                buffer.add(obs, act, rew, obs_next, done)
-                obs = obs_next
-        from tqdm import tqdm, trange
-
-        # Train
+        # Collect data in parallel
+        collector.collect_trajectories(buffer)
+        
+        # Train with progress bar
         pbar = tqdm(range(args.step_per_epoch), desc=f"Epoch {epoch}", unit="step")
         for step in pbar:
             batch = buffer.sample(args.batch_size_pyhj)
             metrics = policy.learn(batch, shared_wm, args.with_finetune, encoder_optim)
-            # set postfix to show actor, critic and encoder‐grad‐norm
+            
             pbar.set_postfix({
                 "actor_loss": f"{metrics['loss/actor']:.8f}",
                 "critic_loss": f"{metrics['loss/critic']:.8f}",
-                "enc_grad":   f"{metrics['grad_norm']:.8f}",
-                "buffer":len(buffer)
+                "enc_grad": f"{metrics['grad_norm']:.8f}",
+                "buffer": len(buffer)
             })
-            wandb.log(metrics, step=epoch)
+            wandb.log(metrics, step=epoch * args.step_per_epoch + step)
         pbar.close()
 
-        # Plot HJ
-        fig1, fig2 = plot_hj(policy, helper_env, shared_wm, thetas, args, device)
+        # Plot HJ using optimized function
+        fig1, fig2 = plot_hj_optimized(policy, helper_env, shared_wm, thetas, args, device)
         wandb.log({
             "HJ_latent/binary": wandb.Image(fig1),
             "HJ_latent/continuous": wandb.Image(fig2),
-        }, step=epoch)
+        })
         plt.close(fig1)
         plt.close(fig2)
 
@@ -494,6 +648,5 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
-# python "/storage1/fs1/sibai/Active/ihab/research_new/dino_wm/train_HJ_dubinslatent_withfinetune.py" --dino_ckpt_dir "/storage1/fs1/sibai/Active/ihab/research_new/checkpt_dino/outputs/dubins/fully trained(prop repeated 3 times)" --config train_HJ_configs.yaml --dino_encoder vc1 --with_finetune --encoder_lr 1e-5 --nx 20 --ny 20 --step-per-epoch 20
-# python "/storage1/fs1/sibai/Active/ihab/research_new/dino_wm/train_HJ_dubinslatent_withfinetune.py" --dino_ckpt_dir "/storage1/fs1/sibai/Active/ihab/research_new/checkpt_dino/outputs/dubins/fully trained(prop repeated 3 times)" --config train_HJ_configs.yaml --dino_encoder vc1  --nx 20 --ny 20 --step-per-epoch 20
+# python "/storage1/fs1/sibai/Active/ihab/research_new/dino_wm/train_HJ_dubinslatent_withfinetune.py" --dino_ckpt_dir "/storage1/fs1/sibai/Active/ihab/research_new/checkpt_dino/outputs/dubins/fully trained(prop repeated 3 times)" --config train_HJ_configs.yaml --dino_encoder vc1 --with_finetune --encoder_lr 1e-6 --nx 20 --ny 20 --step-per-epoch 20 --total-episodes 150
+# python "/storage1/fs1/sibai/Active/ihab/research_new/dino_wm/train_HJ_dubinslatent_withfinetune.py" --dino_ckpt_dir "/storage1/fs1/sibai/Active/ihab/research_new/checkpt_dino/outputs/dubins/fully trained(prop repeated 3 times)" --config train_HJ_configs.yaml --dino_encoder vc1  --nx 20 --ny 20 --step-per-epoch 20 
