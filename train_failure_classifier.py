@@ -4,6 +4,13 @@ import argparse
 import yaml
 from pathlib import Path
 import torch
+from datasets.traj_dset import split_traj_datasets, get_train_val_sliced_with_cost
+from datasets.img_transforms import default_transform
+from tqdm import tqdm, trange
+import wandb
+import os
+import numpy as np
+from sklearn.metrics import confusion_matrix
 
 def args_type(default):
     def parse_string(x):
@@ -48,7 +55,7 @@ def get_args_and_merge_config():
     )
     
     parser.add_argument(
-    "--task", type=str, default="dubins", choices=["dubins", "cargoal", "maniskill", "carla", "pusht"],
+    "--task", type=str, default="maniskillnew",
     help="Which task to perform: dubins, other_task, etc."
     )
     
@@ -72,7 +79,7 @@ def get_args_and_merge_config():
     return args
 
 class FailureClassifier(torch.nn.Module):
-    def __init__(self, wm, args):
+    def __init__(self, sample, wm, args):
         super(FailureClassifier, self).__init__()
         self.wm = wm
         self.args = args
@@ -83,11 +90,13 @@ class FailureClassifier(torch.nn.Module):
         
         For multi-layer one, I use the same setting used in the latent safety filter paper
         '''
+        hidden_dim = self.encode(sample).shape[-1]
+        print(hidden_dim)
         if self.args.single_layer_classifier:
-            self.head = torch.nn.Linear(self.args.latent_dim, 2)
+            self.head = torch.nn.Linear(hidden_dim, 2)
         else:
             self.head = torch.nn.Sequential(
-                torch.nn.Linear(self.args.latent_dim, 512),
+                torch.nn.Linear(hidden_dim, 512),
                 torch.nn.ReLU(),
                 torch.nn.Linear(512, 256),
                 torch.nn.ReLU(),
@@ -103,7 +112,7 @@ class FailureClassifier(torch.nn.Module):
         proprio = obs['proprio'].unsqueeze(1)
         B = vis.shape[0]
         data = {'visual': vis, 'proprio': proprio}
-        latent = self.wm.encode(data)
+        latent = self.wm.encode_obs(data)
         if self.args.with_proprio:
             lat_vis = latent['visual'].reshape(B, -1)
             lat_prop = latent['proprio'].reshape(B, -1)
@@ -135,85 +144,245 @@ class FailureClassifierDataset(torch.utils.data.Dataset):
         label = torch.tensor(self.labels[idx], dtype=torch.long)
         return {'obs': obs, 'labels': label}
 
-def train(fc, train_dataloader, val_dataloader, args):
-    optimizer = torch.optim.Adam(fc.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+def load_data(
+        task,
+        data_path,
+        seed = 42,
+        transform = default_transform,
+        n_rollout = None,
+        normalize_action = False,
+        normalize_states = True,
+        split_ratio = 0.9,
+        num_hist = 1,
+        num_pred = 0,
+        frameskip = 1,
+        with_costs = True,
+        ):
+    if "dubins" in task:
+        from datasets.dubins_dset import PointMazeDataset as Dataset
+    elif "maniskill" in task:
+        from datasets.maniskill_dset import ManiSkillDataset as Dataset
+    elif "carla" in task:
+        from datasets.carla_dset import CarlaDataset as Dataset
+    elif "cargoal" in task:
+        from datasets.cargoal_dset import PointMazeDataset as Dataset
+    else:
+        raise("dataset not supported")
+    path = Path(data_path) / task
+    dset = Dataset(
+        data_path=path,
+        transform=default_transform(),
+        normalize_action=normalize_action,
+        normalize_states=normalize_states,
+        n_rollout=n_rollout,
+        with_costs=with_costs
+    )
+    dset_cost = Dataset(
+        data_path=path,
+        transform=default_transform(),
+        normalize_action=normalize_action,
+        normalize_states=normalize_states,
+        n_rollout=n_rollout,
+        with_costs=with_costs,
+        only_cost=True,
+    )
+    train_slices, val_slices, train_slices_cost, val_slices_cost = get_train_val_sliced_with_cost(
+        traj_dataset=dset, 
+        traj_dataset_cost=dset_cost, 
+        train_fraction=split_ratio, 
+        num_frames=num_hist + num_pred, 
+        random_seed=seed,
+        frameskip=frameskip
+    )
+    return train_slices, val_slices, train_slices_cost, val_slices_cost
+
+def train(fc, train_dataloader, val_dataloader, args, logger):
+    optimizer = torch.optim.Adam(fc.parameters(), lr=float(args.lr), weight_decay=float(args.weight_decay))
     train_stats = {'loss':[]}
-    val_stats = {'loss':[], 'accuracy':[]}
-    for epoch in range(args.epochs):
-        fc.train()
-        for batch in train_dataloader:
+    val_stats = {'val_loss':[], 'val_accuracy':[],'TN':[],'FP':[],'FN':[],'TP':[],'Safe ACC':[],'Unsafe ACC':[]}
+    fc.train()
+    for _ in trange(args.epochs):
+        for idx, batch in enumerate(tqdm(train_dataloader)):
             optimizer.zero_grad()
-            obs = batch['obs'].to(args.device)
-            labels = batch['labels'].to(args.device)
+            obs, act, state, cost = batch
+            if cost.sum() == 0:
+                continue
+            for k, v in obs.items():
+                obs[k] = v.to(args.device).squeeze(1)
+            labels = cost.to(args.device).squeeze(1)
+            print(labels.sum(),labels.shape[0]-labels.sum(),labels.sum()/labels.shape[0])
             logits = fc(obs)
             loss = torch.nn.functional.cross_entropy(logits, labels)
             train_stats['loss'].append(loss.item())
             loss.backward()
             optimizer.step()
-        if (epoch + 1) % args.eval_freq == 0:
-            stats = test(fc, val_dataloader, args)
-            print(f"Epoch {epoch+1}/{args.epochs}, Loss: {stats['loss']:.4f}, Accuracy: {stats['accuracy']:.4f}")
-            val_stats['loss'].append(stats['loss'])
-            val_stats['accuracy'].append(stats['accuracy'])
+            logger.log({"train_loss":loss.item()})
+            # if (idx == 100) or ((idx + 1) % args.eval_freq == 0):
+            if ((idx + 1) % args.eval_freq == 0):
+                stats = test(fc, val_dataloader, args, logger)
+                print(f"Loss: {stats['loss']:.4f}, Accuracy: {stats['accuracy']:.4f}")
+                val_stats['val_loss'].append(stats['loss'])
+                val_stats['val_accuracy'].append(stats['accuracy'])
+                val_stats['TN'].append(stats['TN'])
+                val_stats['TP'].append(stats['TP'])
+                val_stats['FP'].append(stats['FP'])
+                val_stats['FN'].append(stats['FN'])
+                val_stats['Unsafe ACC'].append(stats['Unsafe ACC'])
+                val_stats['Safe ACC'].append(stats['Safe ACC'])
+                logger.log(stats)
     return train_stats, val_stats
 
-def test(fc, test_dataloader, args):
+def test(fc, test_dataloader, args, logger):
     eval_stats = {}
     fc.eval()
     total_preds = torch.tensor([], dtype=torch.long, device=args.device)
+    total_logits = torch.tensor([], dtype=torch.long, device=args.device)
     total_labels = torch.tensor([], dtype=torch.long, device=args.device)
     with torch.no_grad():
         for batch in test_dataloader:
-            obs = batch['obs'].to(args.device)
-            labels = batch['labels'].to(args.device)
+            obs, act, state, cost = batch
+            for k, v in obs.items():
+                obs[k] = v.to(args.device).squeeze(1)
+            labels = cost.to(args.device).squeeze(1)
             logits = fc(obs)
             preds = logits.argmax(dim=-1)
             total_preds = torch.cat((total_preds, preds), dim=0)
+            total_logits = torch.cat((total_logits, logits), dim=0)
             total_labels = torch.cat((total_labels, labels), dim=0)
-        loss = torch.nn.functional.cross_entropy(total_preds, total_labels)/len(test_dataloader)
+        loss = torch.nn.functional.cross_entropy(total_logits, total_labels)/len(test_dataloader)
         eval_stats['loss'] = loss.item()
         acc = (total_preds == total_labels).float().mean().item()
+        total_preds = total_preds.detach().cpu().numpy()
+        total_labels = total_labels.detach().cpu().numpy()
+        cm = confusion_matrix(total_labels, total_preds)
+        tn, fp, fn, tp = cm.ravel()
+        eval_stats['TN'] = tn
+        eval_stats['FP'] = fp
+        eval_stats['FN'] = fn
+        eval_stats['TP'] = tp
+        eval_stats['Unsafe ACC'] = tp / (tp + fn)
+        eval_stats['Safe ACC'] = tn / (tn + fp)
         eval_stats['accuracy'] = acc
     return eval_stats
 
 def main():
+    print("started")
+    wandb.login()
     args = get_args_and_merge_config()
-    ckpt_dir = Path(args.ckpt_dir)
-    ckpt_dir = ckpt_dir / f"{args.task}"
-    hydra_cfg = ckpt_dir / 'hydra.yaml'
-    snapshot = ckpt_dir / 'checkpoints' / 'model_latest.pth'
-    # load train config and model weights
-    train_cfg = OmegaConf.load(str(hydra_cfg))
-    num_action_repeat = train_cfg.num_action_repeat
-    wm = load_model(snapshot, train_cfg, num_action_repeat, device=args.device)
-    wm.eval()
-    fc = FailureClassifier(wm, args).to(args.device)
-    train_data = FailureClassifierDataset(args.data_path, mode="train") 
-    val_data = FailureClassifierDataset(args.data_path, mode="val")
-    test_data = FailureClassifierDataset(args.data_path, mode="test")
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    torch.cuda.manual_seed_all(args.seed)
+
+    train_data, val_data, train_data_cost, _ = load_data(args.task,args.data_path,args.seed)
+    label = torch.zeros(len(train_data))
+
+    for idx, (_, _, _, cost) in enumerate(tqdm(train_data_cost)):
+    # for idx, (_, _, _, cost) in enumerate(tqdm(train_data)):
+        label[idx] = cost[0]
+    sum_unsafe = label.sum()
+    weight_safe = 0.8/(len(train_data)-sum_unsafe)
+    weight_unsafe = 0.2/sum_unsafe
+
+    weights = torch.zeros(len(train_data))
+    weights[label == 0] = weight_safe
+    weights[label == 1] = weight_unsafe
+    sampler_train = torch.utils.data.WeightedRandomSampler(weights=weights, num_samples=len(train_data), replacement=True)
     train_dataloader = torch.utils.data.DataLoader(
-        train_data, batch_size=args.batch_size, shuffle=True, num_workers=4
+        # train_data, batch_size=args.batch_size, shuffle=True
+        train_data, batch_size=args.batch_size, sampler = sampler_train
     )
     val_dataloader = torch.utils.data.DataLoader(
-        val_data, batch_size=args.batch_size, shuffle=False, num_workers=4
+        val_data, batch_size=args.batch_size, shuffle=False
     )
-    test_dataloader = torch.utils.data.DataLoader(
-        test_data, batch_size=args.batch_size, shuffle=False, num_workers=4
-    )
-    train_stats, val_stats = train(fc, train_dataloader, val_dataloader, args)
-    eval_stats = test(fc, test_dataloader, args)
+    _, _, _, cost = next(iter(train_dataloader))
+    print(cost.sum()/cost.shape[0])
 
 
-    # ckpts and stats will be saved to the original ckpt_dir
-    torch.save(
-        {
-            'model_state_dict': fc.state_dict(),
-        },
-        ckpt_dir / 'classifier' / 'failure_classifier.pth'
-    )
+    backbones = ["r3m","vc1","resnet","dino","dino_cls","scratch","full_scratch"]
+    for backbone in backbones:
+        ckpt_dir = Path(args.dino_ckpt_dir)
+        if "maniskill" in args.task:
+            ckpt_dir = Path(f"/storage1/fs1/sibai/Active/ihab/research_new/checkpt_dino/outputs2/maniskill/{backbone}")
+            if backbone == "full_scratch":
+                ckpt_dir = Path(f"/storage1/fs1/sibai/Active/ihab/research_new/checkpt_dino/outputs2/maniskill/vc1")
+        elif "carla" in args.task:
+            ckpt_dir = Path(f"/storage1/fs1/sibai/Active/ihab/research_new/checkpt_dino/outputs2/carla/{backbone}")
+            if backbone == "full_scratch":
+                ckpt_dir = Path(f"/storage1/fs1/sibai/Active/ihab/research_new/checkpt_dino/outputs2/carla/vc1")
+        elif "dubins" in args.task:
+            ckpt_dir = Path(f"/storage1/fs1/sibai/Active/ihab/research_new/checkpt_dino/outputs/dubins/fully_trained_prop_repeated_3_times/{backbone}")
+            if backbone == "full_scratch":
+                ckpt_dir = Path(f"/storage1/fs1/sibai/Active/ihab/research_new/checkpt_dino/outputs/dubins/fully_trained_prop_repeated_3_times/vc1")
+        elif "cargoal" in args.task:
+            ckpt_dir = Path(f"/storage1/fs1/sibai/Active/ihab/research_new/checkpt_dino/outputs2/cargoal/{backbone}")
+            if backbone == "full_scratch":
+                ckpt_dir = Path(f"/storage1/fs1/sibai/Active/ihab/research_new/checkpt_dino/outputs2/cargoal/vc1")
+        else:
+            ckpt_dir = ckpt_dir / f"{args.task}"
+        if not os.path.exists(ckpt_dir / 'classifier' / f"{args.task}_{backbone}"):
+            print(ckpt_dir / 'classifier' / f"{args.task}_{backbone}")
+            os.makedirs(ckpt_dir / 'classifier' / f"{args.task}_{backbone}")
+        hydra_cfg = ckpt_dir / 'hydra.yaml'
+        snapshot = ckpt_dir / 'checkpoints' / 'model_latest.pth'
 
-    torch.save({
-        'train_stats': train_stats,
-        'val_stats': val_stats,
-        'eval_stats': eval_stats
-    }, ckpt_dir / 'classifier' / 'stats.pth')
+        logger = wandb.init(
+            # Set the wandb entity where your project will be logged (generally your team name).
+            entity="i-k-tabbara-washington-university-in-st-louis",
+            # Set the wandb project where this run will be logged.
+            project=f"failure-classifier-{args.task}",
+            dir= ckpt_dir / 'classifier' / f"{args.task}_{backbone}",
+            # Track hyperparameters and run metadata.
+            config=vars(args),
+        )
+        # load train config and model weights
+        train_cfg = OmegaConf.load(str(hydra_cfg))
+        num_action_repeat = train_cfg.num_action_repeat
+        wm = load_model(snapshot, train_cfg, num_action_repeat, device=args.device)
+        wm.eval()
+        if backbone == "full_scratch":
+            for m in wm.modules():
+                if isinstance(m, (torch.nn.Conv2d, torch.nn.Linear)):
+                    torch.nn.init.xavier_uniform_(m.weight)
+            for p in wm.parameters():
+                p.requires_grad = True
+            args.freeze_wm = False
+        else:
+            args.freeze_wm = True
+
+        obs, _, _, _ = next(iter(val_dataloader))
+        for k, v in obs.items():
+            obs[k] = v.to(args.device).squeeze(1)
+        fc = FailureClassifier(obs, wm, args).to(args.device)
+        train_stats, val_stats = train(fc, train_dataloader, val_dataloader, args, logger)
+        # eval_stats = test(fc, val_dataloader, args, logger)
+
+
+        # ckpts and stats will be saved to the original ckpt_dir
+        torch.save(
+            {
+                'model_state_dict': fc.state_dict(),
+            },
+            ckpt_dir / 'classifier' / f"{args.task}_{backbone}" / 'failure_classifier.pth'
+        )
+
+        torch.save({
+            'train_stats': train_stats,
+            'val_stats': val_stats,
+            # 'eval_stats': eval_stats
+        }, ckpt_dir / 'classifier' / f"{args.task}_{backbone}" / 'stats.pth')
+
+        wandb.finish()
+
+if __name__ == "__main__":
+    main()
+
+    # python train_failure_classifier.py --task maniskillnew
+    # bsub -q gpu-compute < bsub.sh
+    # bsub -gpu "num=1" -R "rusage[mem=40]" -q gpu-compute-debug -Is /bin/bash 
+    # bsub -G compute-sibai < script_yuxuan.sh
+
+    # train_dataloader = torch.utils.data.DataLoader(
+    #     # train_data, batch_size=args.batch_size, shuffle=True
+    #     train_data, batch_size=64, sampler = sampler_train
+    # )
+    # _,_,_,cost=next(iter(train_dataloader))
