@@ -732,7 +732,7 @@ def main():
         epoch_dir.mkdir(exist_ok=True)
         torch.save(policy.actor.state_dict(), epoch_dir / "actor.pth")
         torch.save(policy.critic.state_dict(), epoch_dir / "critic.pth")
-        if args.with_finetune:
+        if args.with_finetune and epoch==args.total_episodes:
             torch.save(shared_wm.state_dict(), epoch_dir / "wm.pth")
 
     print("Training complete.")
