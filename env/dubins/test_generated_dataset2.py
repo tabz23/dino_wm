@@ -149,5 +149,5 @@ def visualize_dataset_trajectory(
 
 if __name__ == "__main__":
     # e.g. "/storage1/.../point_maze" or your dubins folder
-    visualize_dataset_trajectory(data_dir="/storage1/sibai/Active/ihab/research_new/datasets_dino/car_goal_2/goal_data",
+    visualize_dataset_trajectory(data_dir="/storage1/fs1/sibai/Active/ihab/research_new/datasets_dino/dubins1800_withcost",
                                  num_traj=2)
