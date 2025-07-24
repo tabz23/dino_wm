@@ -170,15 +170,15 @@ class OptimizedReplayBuffer:
         
         # Convert and store directly in pre-allocated tensors
         self.visual_buffer[self.position] = torch.from_numpy(
-            np.transpose(visual, (2, 0, 1)).astype(np.float32) / 255.0
+            np.transpose(visual, (2, 0, 1)).float() / 255.0
         )
-        self.proprio_buffer[self.position] = torch.from_numpy(proprio.astype(np.float32))
-        self.action_buffer[self.position] = torch.from_numpy(act.astype(np.float32))
+        self.proprio_buffer[self.position] = torch.from_numpy(proprio.float())
+        self.action_buffer[self.position] = torch.from_numpy(act.float())
         self.reward_buffer[self.position] = rew
         self.next_visual_buffer[self.position] = torch.from_numpy(
-            np.transpose(visual_next, (2, 0, 1)).astype(np.float32) / 255.0
+            np.transpose(visual_next, (2, 0, 1)).float() / 255.0
         )
-        self.next_proprio_buffer[self.position] = torch.from_numpy(proprio_next.astype(np.float32))
+        self.next_proprio_buffer[self.position] = torch.from_numpy(proprio_next.float())
         self.done_buffer[self.position] = float(done)
         
         self.position = (self.position + 1) % self.size
@@ -216,7 +216,7 @@ def encode_batch_optimized(obs_batch, wm, device, with_proprio, requires_grad=Fa
                 proprio = obs['proprio']
             else:
                 visual, proprio = obs
-            visual_np = np.transpose(visual, (2, 0, 1)).astype(np.float32) / 255.0
+            visual_np = np.transpose(visual, (2, 0, 1)).float() / 255.0
             visual_list.append(torch.from_numpy(visual_np))
             proprio_list.append(torch.from_numpy(proprio))
         visual_batch = torch.stack(visual_list).to(device)
