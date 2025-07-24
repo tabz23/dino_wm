@@ -16,16 +16,21 @@ class PointMazeDataset(TrajDataset):
         n_rollout: Optional[int] = None,
         transform: Optional[Callable] = None,
         normalize_action: bool = False,
+        normalize_states: bool = True,
+        with_costs: bool = True,
         action_scale=1.0,
+        only_cost: bool = False,
     ):
         self.data_path = Path(data_path)
         self.transform = transform
         self.normalize_action = normalize_action
+        self.only_cost = only_cost
 
         # Load dataset from disk (list of tensors)
         self.states = torch.load(self.data_path / "states.pth")  # list of [T_i, 9]
         self.actions = torch.load(self.data_path / "actions.pth")  # list of [T_i, 1]
         self.seq_lengths = torch.load(self.data_path / 'seq_lengths.pth')  # list of ints
+        self.costs = torch.load(self.data_path / "costs.pth")
 
         # Truncate rollouts if needed
         if n_rollout:
@@ -91,48 +96,62 @@ class PointMazeDataset(TrajDataset):
     #     }
     #     return obs, act, state, {}  # env_info placeholder
     def get_frames(self, idx, frames):
-        obs_dir = self.data_path / "obses"
-        image = torch.load(obs_dir / f"episode_{idx:03d}.pth")  # [T, 224, 224, 3]
-        
-        # Convert frames to list for easier debugging
-        if isinstance(frames, range):
-            frame_list = list(frames)
-        else:
-            frame_list = frames
-        
-        # Debug information
-        seq_len = self.get_seq_length(idx)
-        image_len = image.shape[0]
-        
-        try:
-            # Index sequence
-            image = image[frames]  # THWC
-        except IndexError as e:
-            print(f"ERROR in episode {idx}:")
-            print(f"  Image shape: {image.shape}")
-            print(f"  Stored sequence length: {seq_len}")
-            print(f"  Actual image frames: {image_len}")
-            print(f"  Frames requested: {frames}")
+        if not self.only_cost:
+            obs_dir = self.data_path / "obses"
+            image = torch.load(obs_dir / f"episode_{idx:03d}.pth")  # [T, 224, 224, 3]
+            
+            # Convert frames to list for easier debugging
             if isinstance(frames, range):
-                print(f"  Frames range: min={min(frame_list)}, max={max(frame_list)}, count={len(frame_list)}")
-            print(f"  Original error: {e}")
-            raise e  # Re-raise the error after logging
+                frame_list = list(frames)
+            else:
+                frame_list = frames
+            
+            # Debug information
+            seq_len = self.get_seq_length(idx)
+            image_len = image.shape[0]
+            
+            try:
+                # Index sequence
+                image = image[frames]  # THWC
+            except IndexError as e:
+                print(f"ERROR in episode {idx}:")
+                print(f"  Image shape: {image.shape}")
+                print(f"  Stored sequence length: {seq_len}")
+                print(f"  Actual image frames: {image_len}")
+                print(f"  Frames requested: {frames}")
+                if isinstance(frames, range):
+                    print(f"  Frames range: min={min(frame_list)}, max={max(frame_list)}, count={len(frame_list)}")
+                print(f"  Original error: {e}")
+                raise e  # Re-raise the error after logging
 
-        image = image / 255.0
-        image = rearrange(image, "T H W C -> T C H W")
+            image = image / 255.0
+            image = rearrange(image, "T H W C -> T C H W")
 
-        if self.transform:
-            image = self.transform(image)
+            if self.transform:
+                image = self.transform(image)
 
-        proprio = self.proprios[idx][frames]
-        act = self.actions[idx][frames]
-        state = self.states[idx][frames]
+            proprio = self.proprios[idx][frames]
+            act = self.actions[idx][frames]
+            state = self.states[idx][frames]
 
-        obs = {
-            "visual": image,
-            "proprio": proprio
-        }
-        return obs, act, state, {}  # env_info placeholder
+            obs = {
+                "visual": image,
+                "proprio": proprio
+            }
+            # print(f"obs['visual'] shape: {obs['visual'].shape}")
+            # print(f"obs['proprio'] shape: {obs['proprio'].shape}")
+            # print(f"actions shape: {act.shape}")
+            # print(f"full_states shape: {state.shape}")
+            # # print(f"self.costs shape: {costs.shape}")
+            # print(f"self.costs[idx] shape: {self.costs[idx].shape if hasattr(self.costs[idx], 'shape') else 'scalar'}")
+            # print(f"(self.costs[idx]>0).long() shape: {(self.costs[idx]>0).long().shape if hasattr((self.costs[idx]>0).long(), 'shape') else 'scalar'}")
+            # print(f"frames: {frames}")
+            # print(f"idx: {idx}")
+            # print("---")
+            return obs, act, state, {"cost":(self.costs[idx]<=0).long()}  # env_info placeholder
+        else:
+            return None, None, None, {"cost":(self.costs[idx]<=0).long()}
+
     def __getitem__(self, idx):
         return self.get_frames(idx, range(self.get_seq_length(idx)))
 

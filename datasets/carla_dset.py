@@ -14,10 +14,12 @@ class CarlaDataset(TrajDataset):
         normalize_action: bool = True,
         normalize_states: bool = True,
         n_rollout: Optional[int] = None,
-        with_costs: bool = True
+        with_costs: bool = True,
+        only_cost: bool = False,
     ):
         self.data_path = Path(data_path)
         self.transform = transform 
+        self.only_cost = only_cost
 
         self.states = [traj.float() for traj in torch.load(self.data_path / "states.pth")]
         self.actions = [traj.float() for traj in torch.load(self.data_path / "actions.pth")]
@@ -73,25 +75,28 @@ class CarlaDataset(TrajDataset):
         return torch.cat(result, dim = 0)
 
     def get_frames(self, idx, frames):
-        obs_file = self.data_path / "obses" / f"episode_{int(idx):03d}.pth"
-        device = "cpu"
-        images = torch.load(obs_file, map_location=device)
-        images = images.float() / 255.0
-        images = rearrange(images, "T H W C -> T C H W")
-        if self.transform:
-            images = self.transform(images)
+        if not self.only_cost:
+            obs_file = self.data_path / "obses" / f"episode_{int(idx):03d}.pth"
+            device = "cpu"
+            images = torch.load(obs_file, map_location=device)
+            images = images.float() / 255.0
+            images = rearrange(images, "T H W C -> T C H W")
+            if self.transform:
+                images = self.transform(images)
 
-        image = images[frames]
-        actions = self.actions[idx][frames]
-        full_states = self.states[idx][frames]
-        proprio_states = self.proprios[idx][frames]
-            
-        obs = {
-            "visual" : image,
-            "proprio" : proprio_states
-        }
+            image = images[frames]
+            actions = self.actions[idx][frames]
+            full_states = self.states[idx][frames]
+            proprio_states = self.proprios[idx][frames]
+                
+            obs = {
+                "visual" : image,
+                "proprio" : proprio_states
+            }
 
-        return obs, actions, full_states, {}
+            return obs, actions, full_states, {"cost":(self.costs[idx]>0).long()}
+        else:
+            return None, None, None, {"cost":(self.costs[idx]>0).long()}
         
 
     def __getitem__(self, idx):
