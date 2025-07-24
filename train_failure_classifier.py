@@ -36,7 +36,7 @@ def get_args_and_merge_config():
     parser = argparse.ArgumentParser("Failure Classifier Training")
     parser.add_argument(
         "--dino_ckpt_dir", type=str,
-        default="/storage1/fs1/sibai/Active/ihab/research_new/checkpt_dino/outputs",
+        default="/storage1/fs1/sibai/Active/ihab/research_new/checkpt_dino/outputs2",
         help="Where to find the DINO-WM checkpoints"
     )
     parser.add_argument(
@@ -45,7 +45,7 @@ def get_args_and_merge_config():
     )
     
     parser.add_argument(
-    "--with_proprio", action="store_true",
+    "--without_proprio", default=False, action="store_true",
     help="Flag to include proprioceptive information in latent encoding"
     )
     
@@ -58,7 +58,11 @@ def get_args_and_merge_config():
     "--task", type=str, default="maniskillnew",
     help="Which task to perform: dubins, other_task, etc."
     )
-    
+
+    parser.add_argument(
+    "--finetune", default=False, action='store_true',
+    )
+
     args, remaining = parser.parse_known_args()
 
     # 2) Load all keys & values from the YAML (no `defaults:` wrapper needed)
@@ -139,6 +143,8 @@ class FailureClassifierDataset(torch.utils.data.Dataset):
         visual = self.visual[idx]
         proprio = self.proprio[idx]
         visual = torch.tensor(visual, dtype=torch.float32)
+        # DEBUG: print your min/max once
+        # print(f"[DEBUG] visual raw min={visual.min():.0f}, max={visual.max():.0f}")
         proprio = torch.tensor(proprio, dtype=torch.float32)
         obs = {'visual': visual/255, 'proprio': proprio}
         label = torch.tensor(self.labels[idx], dtype=torch.long)
@@ -210,7 +216,7 @@ def train(fc, train_dataloader, val_dataloader, args, logger):
             for k, v in obs.items():
                 obs[k] = v.to(args.device).squeeze(1)
             labels = cost.to(args.device).squeeze(1)
-            print(labels.sum(),labels.shape[0]-labels.sum(),labels.sum()/labels.shape[0])
+            # print(labels.sum(),labels.shape[0]-labels.sum(),labels.sum()/labels.shape[0])
             logits = fc(obs)
             loss = torch.nn.functional.cross_entropy(logits, labels)
             train_stats['loss'].append(loss.item())
@@ -269,6 +275,8 @@ def main():
     print("started")
     wandb.login()
     args = get_args_and_merge_config()
+    if args.without_proprio:
+        args.with_proprio = False
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
     torch.cuda.manual_seed_all(args.seed)
@@ -299,6 +307,11 @@ def main():
 
 
     backbones = ["r3m","vc1","resnet","dino","dino_cls","scratch","full_scratch"]
+    # backbones = ["r3m","vc1","resnet","dino","dino_cls"]
+    # backbones = ["dino_cls","scratch","full_scratch"]
+    # backbones = ["dino"]
+    if args.finetune:
+        backbones = backbones[:-1]
     for backbone in backbones:
         ckpt_dir = Path(args.dino_ckpt_dir)
         if "maniskill" in args.task:
@@ -319,20 +332,33 @@ def main():
                 ckpt_dir = Path(f"/storage1/fs1/sibai/Active/ihab/research_new/checkpt_dino/outputs2/cargoal/vc1")
         else:
             ckpt_dir = ckpt_dir / f"{args.task}"
-        if not os.path.exists(ckpt_dir / 'classifier' / f"{args.task}_{backbone}"):
-            print(ckpt_dir / 'classifier' / f"{args.task}_{backbone}")
-            os.makedirs(ckpt_dir / 'classifier' / f"{args.task}_{backbone}")
         hydra_cfg = ckpt_dir / 'hydra.yaml'
         snapshot = ckpt_dir / 'checkpoints' / 'model_latest.pth'
 
+        if args.finetune:
+            backbone = f"{backbone}_ft"
+        cls_type = 'classifier'
+        if not args.single_layer_classifier:
+            cls_type = 'classifier_mlp'
+        if not os.path.exists(ckpt_dir / cls_type / f"{args.task}_{backbone}"):
+            print(ckpt_dir / cls_type / f"{args.task}_{backbone}")
+            os.makedirs(ckpt_dir / cls_type / f"{args.task}_{backbone}")
+        config = vars(args)
+        config["backbone"] = backbone
+        config["ckpt_dir"] = ckpt_dir
+        if args.with_proprio:
+            flag = "with-proprio"
+        else:
+            flag = "without-proprio"
+        print(config)
         logger = wandb.init(
             # Set the wandb entity where your project will be logged (generally your team name).
             entity="i-k-tabbara-washington-university-in-st-louis",
             # Set the wandb project where this run will be logged.
-            project=f"failure-classifier-{args.task}",
-            dir= ckpt_dir / 'classifier' / f"{args.task}_{backbone}",
+            project=f"linear-probing-{flag}-{args.task}",
+            dir= ckpt_dir / f'{cls_type}-{flag}' / f"{args.task}_{backbone}",
             # Track hyperparameters and run metadata.
-            config=vars(args),
+            config=config,
         )
         # load train config and model weights
         train_cfg = OmegaConf.load(str(hydra_cfg))
@@ -345,6 +371,7 @@ def main():
                     torch.nn.init.xavier_uniform_(m.weight)
             for p in wm.parameters():
                 p.requires_grad = True
+        if args.finetune or (backbone == "full_scratch"):
             args.freeze_wm = False
         else:
             args.freeze_wm = True
@@ -362,14 +389,14 @@ def main():
             {
                 'model_state_dict': fc.state_dict(),
             },
-            ckpt_dir / 'classifier' / f"{args.task}_{backbone}" / 'failure_classifier.pth'
+            ckpt_dir / f'{cls_type}-{flag}' / f"{args.task}_{backbone}" / 'failure_classifier.pth'
         )
 
         torch.save({
             'train_stats': train_stats,
             'val_stats': val_stats,
             # 'eval_stats': eval_stats
-        }, ckpt_dir / 'classifier' / f"{args.task}_{backbone}" / 'stats.pth')
+        }, ckpt_dir / f'{cls_type}-{flag}' / f"{args.task}_{backbone}" / 'stats.pth')
 
         wandb.finish()
 
