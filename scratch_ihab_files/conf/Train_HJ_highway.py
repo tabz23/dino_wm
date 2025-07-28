@@ -684,34 +684,65 @@ def generate_fixed_states_for_plotting():
     fixed_states = []
     
     # State 1: Cars spread out, ego in middle
-    state1 = np.array([
+    fixed_states.append(np.array([
         0.5, 15.0, 1.0,      # car0: left lane, far ahead
         1.0, 8.0, 2.0, np.pi/2,  # ego: center, middle
         1.5, 12.0, 1.5       # car2: right lane, ahead
-    ])
-    
+    ]))
+
     # State 2: Cars close together, ego behind
-    state2 = np.array([
+    fixed_states.append(np.array([
         0.8, 10.0, 1.5,      # car0: left-center, middle
         1.0, 5.0, 2.5, np.pi/2,  # ego: center, behind
         1.2, 10.0, 1.5       # car2: right-center, middle
-    ])
-    
+    ]))
+
     # State 3: Ego ahead, cars behind
-    state3 = np.array([
+    fixed_states.append(np.array([
         0.5, 5.0, 1.0,       # car0: left, behind
         1.5, 12.0, 2.0, np.pi/2, # ego: right, ahead
         1.0, 7.0, 1.5        # car2: center, middle
-    ])
-    
+    ]))
+
     # State 4: Dense traffic scenario
-    state4 = np.array([
+    fixed_states.append(np.array([
         1.0, 8.0, 1.2,       # car0: center, middle
         0.5, 6.0, 1.8, np.pi/2,  # ego: left, slightly behind
         1.5, 9.0, 1.3        # car2: right, slightly ahead
-    ])
-    
-    return [state1, state2, state3, state4]
+    ]))
+
+    # --- Additional Diverse Scenarios ---
+
+    # State 5: Ego at far left, turning, with cars close on right
+    fixed_states.append(np.array([
+        1.2, 10.0, 1.0,      # car0: center-right, middle
+        0.1, 6.0, 1.5, np.pi/3,  # ego: far left, slightly angled left
+        1.5, 7.0, 1.2        # car2: far right, slightly behind
+    ]))
+
+    # State 6: Ego nearly stopped at center, cars approaching fast
+    fixed_states.append(np.array([
+        1.0, 13.0, 2.5,      # car0: center, very fast
+        1.0, 10.0, 0.2, np.pi/2,  # ego: center, nearly stopped
+        1.0, 12.0, 2.3       # car2: center, fast
+    ]))
+
+    # State 7: Ego near upper Y-bound, fast speed, curved orientation
+    fixed_states.append(np.array([
+        0.5, 18.0, 1.0,      # car0: behind, left
+        1.8, 19.5, 3.0, np.pi/1.8,  # ego: far right, upper bound, curved
+        1.5, 17.0, 1.5       # car2: slightly behind
+    ]))
+
+    # State 8: Ego at bottom Y-bound, heading straight, cars spread
+    fixed_states.append(np.array([
+        0.2, 5.0, 1.0,       # car0: far left, mid
+        1.0, 0.5, 1.0, np.pi/2,  # ego: bottom, center
+        1.8, 10.0, 1.0       # car2: far right, ahead
+    ]))
+
+    return fixed_states
+
 
 def main():
     args = get_args_and_merge_config()
@@ -836,15 +867,15 @@ def main():
         pbar.close()
 
         # Plot HJ every few epochs
-        if epoch % 5 == 0 or epoch == 1:
+        if epoch % 3 == 0 or epoch == 1:
             print("Plotting HJ values...")
             fig = plot_hj_highway(policy, plot_env, fixed_states, args, device)
             
             # Log to wandb
-            wandb.log({
-                "HJ_highway/combined": wandb.Image(fig),
-                "epoch": epoch
-            })
+            # wandb.log({
+            #     "HJ_highway/combined": wandb.Image(fig),
+            #     "epoch": epoch
+            # })
             plt.close(fig)
             
             # Also create individual HJ plots for each fixed state
@@ -866,6 +897,14 @@ def main():
                 # Create a masked array where unsafe regions (vals < 0) are highlighted
                 masked_vals = np.ma.masked_where(vals < 0, vals)
                 
+                
+                '''
+                ✅ What vmin and vmax do in imshow
+They define the range of values that the colormap maps to colors.
+vmin=-1: any value ≤ -1 will be mapped to the lowest color (e.g., deep red in 'RdYlBu')
+vmax=1: any value ≥ 1 will be mapped to the highest color (e.g., deep blue)
+Values between -1 and 1 are linearly interpolated within the colormap.
+'''
                 # Plot safe regions
                 im = ax_hj.imshow(
                     vals.T,
@@ -888,7 +927,7 @@ def main():
                 car0_x, car0_y = fixed_state[0], fixed_state[1]
                 car2_x, car2_y = fixed_state[7], fixed_state[8]
                 
-                ax_hj.plot(ego_x, ego_y, 'k*', markersize=20, label='Ego', markeredgewidth=2)
+                # ax_hj.plot(ego_x, ego_y, 'k*', markersize=20, label='Ego', markeredgewidth=2)
                 ax_hj.plot(car0_x, car0_y, 'ro', markersize=12, label='Car0 (Disturbance)')
                 ax_hj.plot(car2_x, car2_y, 'mo', markersize=12, label='Car2 (Obstacle)')
                 
