@@ -7,11 +7,12 @@
 # source /storage1/sibai/Active/ihab/miniconda3/bin/activate
 # source /storage1/fs1/sibai/Active/ihab/miniconda3/bin/activate
 source activate
-conda activate dino_wm
+conda activate dreamer
 cd /storage1/sibai/Active/ihab/research_new/dino_wm
 export DATASET_DIR=/storage1/fs1/sibai/Active/ihab/research_new/datasets_dino
 export TORCH_HOME=/storage1/fs1/sibai/Active/ihab/tmp/torch
-python -m accelerate.commands.launch train.py --config-name "train copy.yaml" env=pusht frameskip=5 num_hist=3
+python /storage1/sibai/Active/ihab/research_new/SafeDreamer/hj/generate_cargoal_data_dino.py
+
 #WANDB_MODE=disabled python train.py --config-name "train copy.yaml" env=maniskill frameskip=5 num_hist=3
 #WANDB_MODE=disabled accelerate launch train.py --config-name "train copy.yaml" env=maniskill frameskip=5 num_hist=3
 
@@ -42,10 +43,18 @@ python -m accelerate.commands.launch train.py --config-name "train copy.yaml" en
 # mkdir -p /storage1/fs1/sibai/Active/ihab/conda/envs
 # mkdir -p /storage1/fs1/sibai/Active/ihab/conda/pkgs
 
+
+
+
+
+
+
+
+
 ###### HERE 
 export LSF_DOCKER_VOLUMES="/storage1/fs1/sibai/Active:/storage1/fs1/sibai/Active" 
 export LSF_DOCKER_SHM_SIZE='64g'  
-bsub -n 16 -Is -q general-interactive -R 'rusage[mem=102GB]' -M 100GB -R 'gpuhost' -gpu "num=1:gmem=31G"  -a 'docker(continuumio/anaconda3:2021.11)'  /bin/bash 
+bsub -n 12 -Is -q general-interactive -R 'rusage[mem=102GB]' -M 100GB -R 'gpuhost' -gpu "num=1:gmem=31G"  -a 'docker(continuumio/anaconda3:2021.11)'  /bin/bash 
 # bsub -n 12 -Is -q general-interactive -R 'rusage[mem=32GB]' -M 30 -R 'gpuhost' -gpu "num=1:gmem=10G"  -a 'docker(continuumio/anaconda3:2021.11)'  /bin/bash 
 # bsub -n 12 -Is -q general-interactive -R 'rusage[mem=32GB]' -M 30 -R 'gpuhost' -gpu "num=1:gmem=10G" -a 'docker(nvidia/cuda:11.8.0-base-ubuntu22.04)' /bin/bash
 # bsub -n 12 -Is -q general-interactive -R 'rusage[mem=32GB]' -M 30 -R 'gpuhost' -gpu "num=1:gmem=1G" -a 'docker(nvcr.io/nvidia/pytorch:23.10-py3)' /bin/bash
@@ -56,7 +65,9 @@ export PATH="/opt/conda/bin:$PATH" \
 export NETRC=/storage1/fs1/sibai/Active/ihab/tmp/.netrc \
 export DATASET_DIR=/storage1/fs1/sibai/Active/ihab/research_new/datasets_dino \
 export TORCH_HOME=/storage1/fs1/sibai/Active/ihab/tmp/torch \
-export WANDB_CONFIG_DIR=/storage1/fs1/sibai/Active/ihab/tmp/.config\
+export WANDB_CONFIG_DIR=/storage1/fs1/sibai/Active/ihab/tmp/.config \
+export WANDB_DIR=/storage1/fs1/sibai/Active/ihab/tmp/.config \
+export SSL_CERT_FILE=$(python -m certifi) \
 export WANDB_API_KEY=93327b636baa6f7173f93e1e15367cbab6048421
 
 # export TMPDIR=/storage1/fs1/sibai/Active/ihab/tmp \
@@ -67,38 +78,38 @@ bjobs -l 663370 #check ram w hek 5bar
 source /opt/conda/etc/profile.d/conda.sh 
 conda activate dino_wm_ris    
 cd /storage1/fs1/sibai/Active/ihab/research_new/dino_wm
+wandb login
 
-
-python train.py --config-name "train copy.yaml" env=dubins frameskip=5 num_hist=3
-python -m accelerate.commands.launch train.py --config-name "train copy.yaml" env=point_maze frameskip=5 num_hist=3
-# python -m accelerate.commands.launch train.py --config-name "train copy.yaml" env=dubins frameskip=5 num_hist=3 encoder=dino decoder=vqvae
-
-
-
-LSF_DOCKER_VOLUMES='/storage2/fs1/dt-summer-corp/Active/:/storage2/fs1/dt-summer-corp/Active/' \
-LSF_DOCKER_PORTS='8501:8501' \
-LSF_DOCKER_SHM_SIZE='4g' \
-bsub -n 1 -Is -q artsci-interactive \
-     -G compute-dt-summer-corp \
-     -R 'rusage[mem=32GB]' -M 30GB \
-     -R 'gpuhost' -gpu "num=1:gmodel=NVIDIAA10080GBPCIe:gmem=78G" \
-     -m compute1-exec-370.ris.wustl.edu \
-     -R 'select[port8501=1]' \
-     -a 'docker(ahmad8742/urban:latest)' /bin/bash
-
-
-# bsub -n 1 -Is -q general-interactive -R 'rusage[mem=32GB]' -M 30GB -R 'gpuhost' -gpu "num=3:gmem=78G" -a 'docker(continuumio/anaconda3:2021.11)' /bin/bash
-
-# which conda
-# source /opt/conda/etc/profile.d/conda.sh
-# conda activate
-
-
-# NVIDIAA40
-# NVIDIAA10080GBPCIe
-# NVIDIAA100_SXM4_80GB
+# python train.py --config-name "train copy.yaml" env=dubins frameskip=5 num_hist=3
+# python -m accelerate.commands.launch train.py --config-name "train copy.yaml" env=point_maze frameskip=5 num_hist=3
+# # python -m accelerate.commands.launch train.py --config-name "train copy.yaml" env=dubins frameskip=5 num_hist=3 encoder=dino decoder=vqvae
 
 
 
-bsub -n 5  -q general -R 'rusage[mem=52GB]' -M 50GB -R 'gpuhost' -gpu "num=1:gmem=15G"  -a 'docker(continuumio/anaconda3:2021.11)'  /bin/bash -c python /storage1/fs1/sibai/Active/ihab/research_new/dino_wm/train_HJ_dubinslatent.py --dino_encoder r3m  --seed 1 --gamma-pyhj 0.98
+# LSF_DOCKER_VOLUMES='/storage2/fs1/dt-summer-corp/Active/:/storage2/fs1/dt-summer-corp/Active/' \
+# LSF_DOCKER_PORTS='8501:8501' \
+# LSF_DOCKER_SHM_SIZE='4g' \
+# bsub -n 1 -Is -q artsci-interactive \
+#      -G compute-dt-summer-corp \
+#      -R 'rusage[mem=32GB]' -M 30GB \
+#      -R 'gpuhost' -gpu "num=1:gmodel=NVIDIAA10080GBPCIe:gmem=78G" \
+#      -m compute1-exec-370.ris.wustl.edu \
+#      -R 'select[port8501=1]' \
+#      -a 'docker(ahmad8742/urban:latest)' /bin/bash
+
+
+# # bsub -n 1 -Is -q general-interactive -R 'rusage[mem=32GB]' -M 30GB -R 'gpuhost' -gpu "num=3:gmem=78G" -a 'docker(continuumio/anaconda3:2021.11)' /bin/bash
+
+# # which conda
+# # source /opt/conda/etc/profile.d/conda.sh
+# # conda activate
+
+
+# # NVIDIAA40
+# # NVIDIAA10080GBPCIe
+# # NVIDIAA100_SXM4_80GB
+
+
+
+# bsub -n 5  -q general -R 'rusage[mem=52GB]' -M 50GB -R 'gpuhost' -gpu "num=1:gmem=15G"  -a 'docker(continuumio/anaconda3:2021.11)'  /bin/bash -c python /storage1/fs1/sibai/Active/ihab/research_new/dino_wm/train_HJ_dubinslatent.py --dino_encoder r3m  --seed 1 --gamma-pyhj 0.98
 

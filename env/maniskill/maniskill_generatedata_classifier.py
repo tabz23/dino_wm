@@ -162,7 +162,7 @@ class CheckpointController:
             action = action.squeeze(0)
         
         # Convert to numpy for environment
-        return action.cpu().numpy()
+        return action.squeeze(1).squeeze(0).cpu().numpy()
     
     def get_action_tensor(self, observation, deterministic=None):
         """
@@ -187,7 +187,7 @@ class CheckpointController:
         if added_batch:
             action = action.squeeze(0)
         
-        return action
+        return action.squeeze(1).squeeze(0)
     
     def set_deterministic(self, deterministic):
         """Change whether to use deterministic actions"""

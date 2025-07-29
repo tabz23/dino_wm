@@ -11,6 +11,7 @@ import wandb
 import os
 import numpy as np
 from sklearn.metrics import confusion_matrix
+from copy import deepcopy
 
 def args_type(default):
     def parse_string(x):
@@ -63,6 +64,10 @@ def get_args_and_merge_config():
     "--finetune", default=False, action='store_true',
     )
 
+    parser.add_argument(
+    "--single_layer_classifier", default=False, action='store_true',
+    )
+
     args, remaining = parser.parse_known_args()
 
     # 2) Load all keys & values from the YAML (no `defaults:` wrapper needed)
@@ -104,7 +109,7 @@ class FailureClassifier(torch.nn.Module):
                 torch.nn.ReLU(),
                 torch.nn.Linear(512, 256),
                 torch.nn.ReLU(),
-                torch.nn.Linear(256, 2)
+                torch.nn.Linear(256, 1)
             )
 
     def forward(self, obs):
@@ -216,9 +221,15 @@ def train(fc, train_dataloader, val_dataloader, args, logger):
             for k, v in obs.items():
                 obs[k] = v.to(args.device).squeeze(1)
             labels = cost.to(args.device).squeeze(1)
-            # print(labels.sum(),labels.shape[0]-labels.sum(),labels.sum()/labels.shape[0])
             logits = fc(obs)
-            loss = torch.nn.functional.cross_entropy(logits, labels)
+            # print(labels.sum(),labels.shape[0]-labels.sum(),labels.sum()/labels.shape[0])
+            if args.single_layer_classifier:
+                loss = torch.nn.functional.cross_entropy(logits, labels)
+            else:
+                labels[labels == 1] = -1
+                labels[labels == 0] = 1
+                labels = labels.float()
+                loss = torch.nn.functional.mse_loss(logits,labels)
             train_stats['loss'].append(loss.item())
             loss.backward()
             optimizer.step()
@@ -251,11 +262,23 @@ def test(fc, test_dataloader, args, logger):
                 obs[k] = v.to(args.device).squeeze(1)
             labels = cost.to(args.device).squeeze(1)
             logits = fc(obs)
-            preds = logits.argmax(dim=-1)
+            if args.single_layer_classifier:
+                preds = logits.argmax(dim=-1)
+            else:
+                preds = torch.zeros_like(logits)
+                preds[logits <= 0] = 1
+                preds[logits > 0] = 0
             total_preds = torch.cat((total_preds, preds), dim=0)
             total_logits = torch.cat((total_logits, logits), dim=0)
             total_labels = torch.cat((total_labels, labels), dim=0)
-        loss = torch.nn.functional.cross_entropy(total_logits, total_labels)/len(test_dataloader)
+        
+        if args.single_layer_classifier:
+            loss = torch.nn.functional.cross_entropy(total_logits, total_labels)/len(test_dataloader)
+        else:
+            targets = deepcopy(total_labels)
+            targets[targets == 0] = 1
+            targets[targets == 1] = -1
+            loss = torch.nn.functional.mse_loss(total_logits,targets.float())
         eval_stats['loss'] = loss.item()
         acc = (total_preds == total_labels).float().mean().item()
         total_preds = total_preds.detach().cpu().numpy()
@@ -288,8 +311,8 @@ def main():
     # for idx, (_, _, _, cost) in enumerate(tqdm(train_data)):
         label[idx] = cost[0]
     sum_unsafe = label.sum()
-    weight_safe = 0.8/(len(train_data)-sum_unsafe)
-    weight_unsafe = 0.2/sum_unsafe
+    weight_safe = 0.5/(len(train_data)-sum_unsafe)
+    weight_unsafe = 0.5/sum_unsafe
 
     weights = torch.zeros(len(train_data))
     weights[label == 0] = weight_safe
@@ -307,11 +330,10 @@ def main():
 
 
     backbones = ["r3m","vc1","resnet","dino","dino_cls","scratch","full_scratch"]
-    # backbones = ["r3m","vc1","resnet","dino","dino_cls"]
-    # backbones = ["dino_cls","scratch","full_scratch"]
-    # backbones = ["dino"]
+    # backbones = ["full_scratch"]
     if args.finetune:
         backbones = backbones[:-1]
+    save_path = Path(args.save_path)
     for backbone in backbones:
         ckpt_dir = Path(args.dino_ckpt_dir)
         if "maniskill" in args.task:
@@ -323,9 +345,9 @@ def main():
             if backbone == "full_scratch":
                 ckpt_dir = Path(f"/storage1/fs1/sibai/Active/ihab/research_new/checkpt_dino/outputs2/carla/vc1")
         elif "dubins" in args.task:
-            ckpt_dir = Path(f"/storage1/fs1/sibai/Active/ihab/research_new/checkpt_dino/outputs/dubins/fully_trained_prop_repeated_3_times/{backbone}")
+            ckpt_dir = Path(f"/storage1/fs1/sibai/Active/ihab/research_new/checkpt_dino/outputs2/dubins/{backbone}")
             if backbone == "full_scratch":
-                ckpt_dir = Path(f"/storage1/fs1/sibai/Active/ihab/research_new/checkpt_dino/outputs/dubins/fully_trained_prop_repeated_3_times/vc1")
+                ckpt_dir = Path(f"/storage1/fs1/sibai/Active/ihab/research_new/checkpt_dino/outputs2/dubins/vc1")
         elif "cargoal" in args.task:
             ckpt_dir = Path(f"/storage1/fs1/sibai/Active/ihab/research_new/checkpt_dino/outputs2/cargoal/{backbone}")
             if backbone == "full_scratch":
@@ -337,12 +359,9 @@ def main():
 
         if args.finetune:
             backbone = f"{backbone}_ft"
-        cls_type = 'classifier'
+        training_type = "linear-probing"
         if not args.single_layer_classifier:
-            cls_type = 'classifier_mlp'
-        if not os.path.exists(ckpt_dir / cls_type / f"{args.task}_{backbone}"):
-            print(ckpt_dir / cls_type / f"{args.task}_{backbone}")
-            os.makedirs(ckpt_dir / cls_type / f"{args.task}_{backbone}")
+            training_type = "MLP"
         config = vars(args)
         config["backbone"] = backbone
         config["ckpt_dir"] = ckpt_dir
@@ -351,14 +370,17 @@ def main():
         else:
             flag = "without-proprio"
         print(config)
+        if not os.path.exists(save_path / training_type / args.task  / backbone / flag):
+            os.makedirs(save_path / training_type / args.task  / backbone / flag)
         logger = wandb.init(
             # Set the wandb entity where your project will be logged (generally your team name).
             entity="i-k-tabbara-washington-university-in-st-louis",
             # Set the wandb project where this run will be logged.
-            project=f"linear-probing-{flag}-{args.task}",
-            dir= ckpt_dir / f'{cls_type}-{flag}' / f"{args.task}_{backbone}",
+            project=f"{training_type}-{flag}-{args.task}",
+            dir= save_path / training_type / args.task  / backbone / flag ,
             # Track hyperparameters and run metadata.
             config=config,
+            name=f"{backbone}"
         )
         # load train config and model weights
         train_cfg = OmegaConf.load(str(hydra_cfg))
@@ -389,14 +411,14 @@ def main():
             {
                 'model_state_dict': fc.state_dict(),
             },
-            ckpt_dir / f'{cls_type}-{flag}' / f"{args.task}_{backbone}" / 'failure_classifier.pth'
+            save_path / training_type / args.task  / backbone / flag / 'failure_classifier.pth'
         )
 
         torch.save({
             'train_stats': train_stats,
             'val_stats': val_stats,
             # 'eval_stats': eval_stats
-        }, ckpt_dir / f'{cls_type}-{flag}' / f"{args.task}_{backbone}" / 'stats.pth')
+        }, save_path / training_type / args.task  / backbone / flag / 'stats.pth')
 
         wandb.finish()
 
@@ -406,10 +428,15 @@ if __name__ == "__main__":
     # python train_failure_classifier.py --task maniskillnew
     # bsub -q gpu-compute < bsub.sh
     # bsub -gpu "num=1" -R "rusage[mem=40]" -q gpu-compute-debug -Is /bin/bash 
+    # bsub -Is /bin/bash 
     # bsub -G compute-sibai < script_yuxuan.sh
+    # bsub -n 12 -q general-interactive -Is -G compute-sibai -R 'rusage[mem=102GB]' -M 100GB -R 'gpuhost' -gpu "num=1:gmem=30G" -a 'docker(continuumio/anaconda3:2021.11)' -env "LSF_DOCKER_VOLUMES=/storage1/fs1/sibai/Active:/storage1/fs1/sibai/Active,LSF_DOCKER_SHM_SIZE=32g" /bin/bash
+
 
     # train_dataloader = torch.utils.data.DataLoader(
     #     # train_data, batch_size=args.batch_size, shuffle=True
     #     train_data, batch_size=64, sampler = sampler_train
     # )
     # _,_,_,cost=next(iter(train_dataloader))
+
+    # cd /storage1/fs1/sibai/Active/ihab/research_new/dino_wm

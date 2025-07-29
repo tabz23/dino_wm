@@ -1,41 +1,52 @@
 #!/bin/bash
-#BSUB -n 12
+#BSUB -n 8
 #BSUB -q general
 #BSUB -G compute-sibai 
-#BSUB -R 'rusage[mem=202GB]'
-#BSUB -M 200GB
+#BSUB -R 'rusage[mem=182GB]'
+#BSUB -M 180GB
 #BSUB -R 'gpuhost'
 #BSUB -gpu "num=1:gmodel=NVIDIAA40"
 #BSUB -a 'docker(continuumio/anaconda3:2021.11)'
 #BSUB -W 600:00
 #BSUB -J dino_wm_job
-#BSUB -oo /storage1/fs1/sibai/Active/ihab/research_new/dino_wm/scratch_ihab_files/logs_new/output%J.log
-#BSUB -eo /storage1/fs1/sibai/Active/ihab/research_new/dino_wm/scratch_ihab_files/logs_new/error%J.log
+#BSUB -oo /storage1/fs1/sibai/Active/ihab/research_new/dino_wm/scratch_ihab_files/logs_newn/output%J.log
+#BSUB -eo /storage1/fs1/sibai/Active/ihab/research_new/dino_wm/scratch_ihab_files/logs_newn/error%J.log
 #BSUB -env "LSF_DOCKER_VOLUMES=/storage1/fs1/sibai/Active:/storage1/fs1/sibai/Active,LSF_DOCKER_SHM_SIZE=64g"
+#BSUB -N
+#BSUB -u i.k.tabbara@wustl.edu
 
 
 
 # Environment variables for your run
-export CONDA_ENVS_DIRS="/storage1/fs1/sibai/Active/ihab/conda/envs"
-export CONDA_PKGS_DIRS="/storage1/fs1/sibai/Active/ihab/conda/pkgs"
-export PATH="/opt/conda/bin:$PATH"
-export NETRC=/storage1/fs1/sibai/Active/ihab/tmp/.netrc
-export DATASET_DIR=/storage1/fs1/sibai/Active/ihab/research_new/datasets_dino
-export TMPDIR=/storage1/fs1/sibai/Active/ihab/tmp
-export TORCH_HOME=/storage1/fs1/sibai/Active/ihab/tmp/torch
+export CONDA_ENVS_DIRS="/storage1/fs1/sibai/Active/ihab/conda/envs" 
+export CONDA_PKGS_DIRS="/storage1/fs1/sibai/Active/ihab/conda/pkgs" 
+export PATH="/opt/conda/bin:$PATH" 
+export NETRC=/storage1/fs1/sibai/Active/ihab/tmp/.netrc 
+export DATASET_DIR=/storage1/fs1/sibai/Active/ihab/research_new/datasets_dino 
+export TORCH_HOME=/storage1/fs1/sibai/Active/ihab/tmp/torch 
 export WANDB_CONFIG_DIR=/storage1/fs1/sibai/Active/ihab/tmp/.config
+export WANDB_API_KEY=93327b636baa6f7173f93e1e15367cbab6048421
+export SSL_CERT_FILE=$(python -m certifi)
+export HYDRA_FULL_ERROR=1
 df -h /dev/shm
 # export ACCELERATE_DISABLE_HOST_CHECK=1
 # export WANDB_MODE=offline
 source /opt/conda/etc/profile.d/conda.sh
 conda activate dino_wm_ris
-export SSL_CERT_FILE=$(python -m certifi)
+
 cd /storage1/fs1/sibai/Active/ihab/research_new/dino_wm
-export HYDRA_FULL_ERROR=1
+
 # Launch training
 # #TeslaV100_SXM2_32GB  NVIDIAA40 NVIDIAA100_SXM4_40GB
 
+# python /storage1/fs1/sibai/Active/ihab/research_new/dino_wm/train_failure_classifier.py --seed 1 --task cargoalnewshort --without_proprio
+# python /storage1/fs1/sibai/Active/ihab/research_new/dino_wm/train_failure_classifier.py --seed 1 --task maniskillnew --without_proprio
 
+
+python /storage1/fs1/sibai/Active/ihab/research_new/dino_wm/train_failure_classifier.py --seed 1 --task carlad_istance_cost
+python /storage1/fs1/sibai/Active/ihab/research_new/dino_wm/train_failure_classifier.py --seed 1 --task carla_distance_cost --without_proprio
+
+# python /storage1/fs1/sibai/Active/ihab/research_new/dino_wm/train_failure_classifier.py --seed 1 --task cargoalnew
 
 #CARGOAL
 # python -m accelerate.commands.launch train.py --config-name "train copy.yaml" env=maniskill frameskip=5 num_hist=3 encoder=dino decoder=vqvae proprio_emb_dim=100 training.batch_size=24 ##USE PYTHON MESH ACCELERATE
@@ -99,14 +110,14 @@ export HYDRA_FULL_ERROR=1
 
 # # #dubins
 # # ## MANI might need to re-run maniskill with larger action embed dimension
-# python -m accelerate.commands.launch train.py --config-name "train copy.yaml" env=carla frameskip=5 num_hist=3 encoder=dino_cls decoder=transposed_conv proprio_emb_dim=10 training.batch_size=32 training.epochs=100
-# python -m accelerate.commands.launch train.py --config-name "train copy.yaml" env=carla frameskip=5 num_hist=3 encoder=vc1      decoder=transposed_conv proprio_emb_dim=10 training.batch_size=32 training.epochs=100
-# python -m accelerate.commands.launch train.py --config-name "train copy.yaml" env=carla frameskip=5 num_hist=3 encoder=resnet   decoder=transposed_conv proprio_emb_dim=10 training.batch_size=32 training.epochs=100 
-# python -m accelerate.commands.launch train.py --config-name "train copy.yaml" env=carla frameskip=5 num_hist=3 encoder=scratch model.train_encoder=true decoder=transposed_conv proprio_emb_dim=3 training.batch_size=32 training.epochs=100
-# python -m accelerate.commands.launch train.py --config-name "train copy.yaml" env=carla frameskip=5 num_hist=3 encoder=r3m      decoder=transposed_conv proprio_emb_dim=10 training.batch_size=32 training.epochs=100 
-# python -m accelerate.commands.launch train.py --config-name "train copy.yaml" env=carla frameskip=5 num_hist=3 encoder=dino     decoder=vqvae proprio_emb_dim=10  training.batch_size=16 training.epochs=100 
+# python -m accelerate.commands.launch train.py --config-name "train copy.yaml" env=dubins frameskip=5 num_hist=3 encoder=dino_cls decoder=transposed_conv proprio_emb_dim=10 training.batch_size=32 training.epochs=100
+# python -m accelerate.commands.launch train.py --config-name "train copy.yaml" env=dubins frameskip=5 num_hist=3 encoder=vc1      decoder=transposed_conv proprio_emb_dim=10 training.batch_size=32 training.epochs=100
+# python -m accelerate.commands.launch train.py --config-name "train copy.yaml" env=dubins frameskip=5 num_hist=3 encoder=resnet   decoder=transposed_conv proprio_emb_dim=10 training.batch_size=32 training.epochs=100 
+# python -m accelerate.commands.launch train.py --config-name "train copy.yaml" env=dubins frameskip=5 num_hist=3 encoder=scratch model.train_encoder=true decoder=transposed_conv proprio_emb_dim=3 training.batch_size=32 training.epochs=100
+# python -m accelerate.commands.launch train.py --config-name "train copy.yaml" env=dubins frameskip=5 num_hist=3 encoder=r3m      decoder=transposed_conv proprio_emb_dim=10 training.batch_size=32 training.epochs=100 
+# python -m accelerate.commands.launch train.py --config-name "train copy.yaml" env=dubins frameskip=5 num_hist=3 encoder=dino     decoder=vqvae proprio_emb_dim=10  training.batch_size=16 training.epochs=100 
 
-
+# python -m accelerate.commands.launch train.py --config-name "train copy.yaml" env=carla frameskip=5 num_hist=3 encoder=dino     decoder=vqvae proprio_emb_dim=20  training.batch_size=16 training.epochs=100 
 
 # python -m accelerate.commands.launch train.py --config-name "train copy.yaml" env=carla frameskip=5 num_hist=3 encoder=dino_cls decoder=transposed_conv proprio_emb_dim=6 training.batch_size=32 training.epochs=1 proprio_encoder=dummy
 # python -m accelerate.commands.launch train.py --config-name "train copy.yaml" env=carla frameskip=5 num_hist=3 encoder=vc1      decoder=transposed_conv proprio_emb_dim=6 training.batch_size=32 training.epochs=1 proprio_encoder=dummy
@@ -127,8 +138,14 @@ export HYDRA_FULL_ERROR=1
 # python /storage1/fs1/sibai/Active/ihab/research_new/dino_wm/train_HJ_dubinslatent.py --dino_encoder dino_cls --seed 1 --gamma_pyhj 0.99
 
 
-# python "/storage1/fs1/sibai/Active/ihab/research_new/dino_wm/train_HJ_dubinslatent_withfinetune.py" --dino_ckpt_dir "/storage1/fs1/sibai/Active/ihab/research_new/checkpt_dino/outputs/dubins/fully trained(prop repeated 3 times)" --config train_HJ_configs.yaml --dino_encoder vc1 --with_finetune --encoder_lr 1e-6 --nx 50 --ny 50 --step-per-epoch 200 --total-episodes 200 --batch_size-pyhj 64 --gamma-pyhj 0.99
+
+
+
+
+
+
 # python "/storage1/fs1/sibai/Active/ihab/research_new/dino_wm/train_HJ_dubinslatent_withfinetune.py" --dino_ckpt_dir "/storage1/fs1/sibai/Active/ihab/research_new/checkpt_dino/outputs/dubins/fully trained(prop repeated 3 times)" --config train_HJ_configs.yaml --dino_encoder vc1  --nx 50 --ny 50 --step-per-epoch 200 --total-episodes 200 --batch_size-pyhj 64 --gamma-pyhj 0.99
+# python "/storage1/fs1/sibai/Active/ihab/research_new/dino_wm/train_HJ_dubinslatent_withfinetune.py" --dino_ckpt_dir "/storage1/fs1/sibai/Active/ihab/research_new/checkpt_dino/outputs/dubins/fully trained(prop repeated 3 times)" --config train_HJ_configs.yaml --dino_encoder vc1 --with_finetune --encoder_lr 1e-6 --nx 50 --ny 50 --step-per-epoch 200 --total-episodes 200 --batch_size-pyhj 64 --gamma-pyhj 0.99
 
 # python "/storage1/fs1/sibai/Active/ihab/research_new/dino_wm/train_HJ_dubinslatent_withfinetune.py" --dino_ckpt_dir "/storage1/fs1/sibai/Active/ihab/research_new/checkpt_dino/outputs/dubins/fully trained(prop repeated 3 times)" --config train_HJ_configs.yaml --dino_encoder r3m --with_finetune --encoder_lr 1e-6 --nx 50 --ny 50 --step-per-epoch 200 --total-episodes 200 --batch_size-pyhj 64 --gamma-pyhj 0.99
 # python "/storage1/fs1/sibai/Active/ihab/research_new/dino_wm/train_HJ_dubinslatent_withfinetune.py" --dino_ckpt_dir "/storage1/fs1/sibai/Active/ihab/research_new/checkpt_dino/outputs/dubins/fully trained(prop repeated 3 times)" --config train_HJ_configs.yaml --dino_encoder r3m  --nx 50 --ny 50 --step-per-epoch 200 --total-episodes 200 --batch_size-pyhj 64 --gamma-pyhj 0.99
@@ -136,11 +153,35 @@ export HYDRA_FULL_ERROR=1
 # python "/storage1/fs1/sibai/Active/ihab/research_new/dino_wm/train_HJ_dubinslatent_withfinetune.py" --dino_ckpt_dir "/storage1/fs1/sibai/Active/ihab/research_new/checkpt_dino/outputs/dubins/fully trained(prop repeated 3 times)" --config train_HJ_configs.yaml --dino_encoder resnet --with_finetune --encoder_lr 1e-6 --nx 50 --ny 50 --step-per-epoch 200 --total-episodes 200 --batch_size-pyhj 64 --gamma-pyhj 0.99
 # python "/storage1/fs1/sibai/Active/ihab/research_new/dino_wm/train_HJ_dubinslatent_withfinetune.py" --dino_ckpt_dir "/storage1/fs1/sibai/Active/ihab/research_new/checkpt_dino/outputs/dubins/fully trained(prop repeated 3 times)" --config train_HJ_configs.yaml --dino_encoder resnet  --nx 50 --ny 50 --step-per-epoch 200 --total-episodes 200 --batch_size-pyhj 64 --gamma-pyhj 0.99
 
-python "/storage1/fs1/sibai/Active/ihab/research_new/dino_wm/train_HJ_dubinslatent_withfinetune.py" --dino_ckpt_dir "/storage1/fs1/sibai/Active/ihab/research_new/checkpt_dino/outputs/dubins/fully trained(prop repeated 3 times)" --config train_HJ_configs.yaml --dino_encoder dino_cls --with_finetune --encoder_lr 1e-6 --nx 50 --ny 50 --step-per-epoch 200 --total-episodes 200 --batch_size-pyhj 64 --gamma-pyhj 0.99
-python "/storage1/fs1/sibai/Active/ihab/research_new/dino_wm/train_HJ_dubinslatent_withfinetune.py" --dino_ckpt_dir "/storage1/fs1/sibai/Active/ihab/research_new/checkpt_dino/outputs/dubins/fully trained(prop repeated 3 times)" --config train_HJ_configs.yaml --dino_encoder dino_cls  --nx 50 --ny 50 --step-per-epoch 200 --total-episodes 200 --batch_size-pyhj 64 --gamma-pyhj 0.99
 
-python "/storage1/fs1/sibai/Active/ihab/research_new/dino_wm/train_HJ_dubinslatent_withfinetune.py" --dino_ckpt_dir "/storage1/fs1/sibai/Active/ihab/research_new/checkpt_dino/outputs/dubins/fully trained(prop repeated 3 times)" --config train_HJ_configs.yaml --dino_encoder scratch --with_finetune --encoder_lr 1e-6 --nx 50 --ny 50 --step-per-epoch 200 --total-episodes 200 --batch_size-pyhj 64 --gamma-pyhj 0.99
-python "/storage1/fs1/sibai/Active/ihab/research_new/dino_wm/train_HJ_dubinslatent_withfinetune.py" --dino_ckpt_dir "/storage1/fs1/sibai/Active/ihab/research_new/checkpt_dino/outputs/dubins/fully trained(prop repeated 3 times)" --config train_HJ_configs.yaml --dino_encoder scratch  --nx 50 --ny 50 --step-per-epoch 200 --total-episodes 200 --batch_size-pyhj 64 --gamma-pyhj 0.99
+# python "/storage1/fs1/sibai/Active/ihab/research_new/dino_wm/train_HJ_dubinslatent_withfinetune.py" --dino_ckpt_dir "/storage1/fs1/sibai/Active/ihab/research_new/checkpt_dino/outputs/dubins/fully trained(prop repeated 3 times)" --config train_HJ_configs.yaml --dino_encoder dino_cls  --nx 50 --ny 50 --step-per-epoch 200 --total-episodes 200 --batch_size-pyhj 64 --gamma-pyhj 0.99
+# python "/storage1/fs1/sibai/Active/ihab/research_new/dino_wm/train_HJ_dubinslatent_withfinetune.py" --dino_ckpt_dir "/storage1/fs1/sibai/Active/ihab/research_new/checkpt_dino/outputs/dubins/fully trained(prop repeated 3 times)" --config train_HJ_configs.yaml --dino_encoder dino_cls --with_finetune --encoder_lr 1e-6 --nx 50 --ny 50 --step-per-epoch 200 --total-episodes 200 --batch_size-pyhj 64 --gamma-pyhj 0.99
 
-python "/storage1/fs1/sibai/Active/ihab/research_new/dino_wm/train_HJ_dubinslatent_withfinetune.py" --dino_ckpt_dir "/storage1/fs1/sibai/Active/ihab/research_new/checkpt_dino/outputs/dubins/fully trained(prop repeated 3 times)" --config train_HJ_configs.yaml --dino_encoder dino --with_finetune --encoder_lr 1e-6 --nx 50 --ny 50 --step-per-epoch 200 --total-episodes 200 --batch_size-pyhj 64 --gamma-pyhj 0.99
-python "/storage1/fs1/sibai/Active/ihab/research_new/dino_wm/train_HJ_dubinslatent_withfinetune.py" --dino_ckpt_dir "/storage1/fs1/sibai/Active/ihab/research_new/checkpt_dino/outputs/dubins/fully trained(prop repeated 3 times)" --config train_HJ_configs.yaml --dino_encoder dino  --nx 50 --ny 50 --step-per-epoch 200 --total-episodes 200 --batch_size-pyhj 64 --gamma-pyhj 0.99
+# python "/storage1/fs1/sibai/Active/ihab/research_new/dino_wm/train_HJ_dubinslatent_withfinetune.py" --dino_ckpt_dir "/storage1/fs1/sibai/Active/ihab/research_new/checkpt_dino/outputs/dubins/fully trained(prop repeated 3 times)" --config train_HJ_configs.yaml --dino_encoder scratch --with_finetune --encoder_lr 1e-6 --nx 50 --ny 50 --step-per-epoch 200 --total-episodes 200 --batch_size-pyhj 64 --gamma-pyhj 0.99
+# python "/storage1/fs1/sibai/Active/ihab/research_new/dino_wm/train_HJ_dubinslatent_withfinetune.py" --dino_ckpt_dir "/storage1/fs1/sibai/Active/ihab/research_new/checkpt_dino/outputs/dubins/fully trained(prop repeated 3 times)" --config train_HJ_configs.yaml --dino_encoder scratch  --nx 50 --ny 50 --step-per-epoch 200 --total-episodes 200 --batch_size-pyhj 64 --gamma-pyhj 0.99
+
+# python "/storage1/fs1/sibai/Active/ihab/research_new/dino_wm/train_HJ_dubinslatent_withfinetune.py" --dino_ckpt_dir "/storage1/fs1/sibai/Active/ihab/research_new/checkpt_dino/outputs/dubins/fully trained(prop repeated 3 times)" --config train_HJ_configs.yaml --dino_encoder dino --with_finetune --encoder_lr 1e-6 --nx 50 --ny 50 --step-per-epoch 200 --total-episodes 200 --batch_size-pyhj 64 --gamma-pyhj 0.99
+# python "/storage1/fs1/sibai/Active/ihab/research_new/dino_wm/train_HJ_dubinslatent_withfinetune.py" --dino_ckpt_dir "/storage1/fs1/sibai/Active/ihab/research_new/checkpt_dino/outputs/dubins/fully trained(prop repeated 3 times)" --config train_HJ_configs.yaml --dino_encoder dino  --nx 50 --ny 50 --step-per-epoch 200 --total-episodes 200 --batch_size-pyhj 64 --gamma-pyhj 0.99
+
+
+
+
+
+# python "/storage1/fs1/sibai/Active/ihab/research_new/dino_wm/train_HJ_dubinslatent_withfinetune.py" --dino_ckpt_dir "/storage1/fs1/sibai/Active/ihab/research_new/checkpt_dino/outputs/dubins/fully trained(prop repeated 3 times)" --config train_HJ_configs.yaml --dino_encoder vc1  --nx 50 --ny 50 --step-per-epoch 200 --total-episodes 200 --batch_size-pyhj 64 --gamma-pyhj 0.99
+# python "/storage1/fs1/sibai/Active/ihab/research_new/dino_wm/train_HJ_dubinslatent_withfinetune.py" --dino_ckpt_dir "/storage1/fs1/sibai/Active/ihab/research_new/checkpt_dino/outputs/dubins/fully trained(prop repeated 3 times)" --config train_HJ_configs.yaml --dino_encoder vc1 --with_finetune --encoder_lr 1e-3 --nx 50 --ny 50 --step-per-epoch 200 --total-episodes 200 --batch_size-pyhj 64 --gamma-pyhj 0.99
+
+# python "/storage1/fs1/sibai/Active/ihab/research_new/dino_wm/train_HJ_dubinslatent_withfinetune.py" --dino_ckpt_dir "/storage1/fs1/sibai/Active/ihab/research_new/checkpt_dino/outputs/dubins/fully trained(prop repeated 3 times)" --config train_HJ_configs.yaml --dino_encoder r3m --with_finetune --encoder_lr 1e-3 --nx 50 --ny 50 --step-per-epoch 200 --total-episodes 200 --batch_size-pyhj 64 --gamma-pyhj 0.99
+# python "/storage1/fs1/sibai/Active/ihab/research_new/dino_wm/train_HJ_dubinslatent_withfinetune.py" --dino_ckpt_dir "/storage1/fs1/sibai/Active/ihab/research_new/checkpt_dino/outputs/dubins/fully trained(prop repeated 3 times)" --config train_HJ_configs.yaml --dino_encoder r3m  --nx 50 --ny 50 --step-per-epoch 200 --total-episodes 200 --batch_size-pyhj 64 --gamma-pyhj 0.99
+
+# python "/storage1/fs1/sibai/Active/ihab/research_new/dino_wm/train_HJ_dubinslatent_withfinetune.py" --dino_ckpt_dir "/storage1/fs1/sibai/Active/ihab/research_new/checkpt_dino/outputs/dubins/fully trained(prop repeated 3 times)" --config train_HJ_configs.yaml --dino_encoder resnet --with_finetune --encoder_lr 1e-3 --nx 50 --ny 50 --step-per-epoch 200 --total-episodes 200 --batch_size-pyhj 64 --gamma-pyhj 0.99
+# python "/storage1/fs1/sibai/Active/ihab/research_new/dino_wm/train_HJ_dubinslatent_withfinetune.py" --dino_ckpt_dir "/storage1/fs1/sibai/Active/ihab/research_new/checkpt_dino/outputs/dubins/fully trained(prop repeated 3 times)" --config train_HJ_configs.yaml --dino_encoder resnet  --nx 50 --ny 50 --step-per-epoch 200 --total-episodes 200 --batch_size-pyhj 64 --gamma-pyhj 0.99
+
+
+# python "/storage1/fs1/sibai/Active/ihab/research_new/dino_wm/train_HJ_dubinslatent_withfinetune.py" --dino_ckpt_dir "/storage1/fs1/sibai/Active/ihab/research_new/checkpt_dino/outputs/dubins/fully trained(prop repeated 3 times)" --config train_HJ_configs.yaml --dino_encoder dino_cls  --nx 50 --ny 50 --step-per-epoch 200 --total-episodes 200 --batch_size-pyhj 64 --gamma-pyhj 0.99
+# python "/storage1/fs1/sibai/Active/ihab/research_new/dino_wm/train_HJ_dubinslatent_withfinetune.py" --dino_ckpt_dir "/storage1/fs1/sibai/Active/ihab/research_new/checkpt_dino/outputs/dubins/fully trained(prop repeated 3 times)" --config train_HJ_configs.yaml --dino_encoder dino_cls --with_finetune --encoder_lr 1e-3 --nx 50 --ny 50 --step-per-epoch 200 --total-episodes 200 --batch_size-pyhj 64 --gamma-pyhj 0.99
+
+# python "/storage1/fs1/sibai/Active/ihab/research_new/dino_wm/train_HJ_dubinslatent_withfinetune.py" --dino_ckpt_dir "/storage1/fs1/sibai/Active/ihab/research_new/checkpt_dino/outputs/dubins/fully trained(prop repeated 3 times)" --config train_HJ_configs.yaml --dino_encoder scratch --with_finetune --encoder_lr 1e-3 --nx 50 --ny 50 --step-per-epoch 200 --total-episodes 200 --batch_size-pyhj 64 --gamma-pyhj 0.99
+# python "/storage1/fs1/sibai/Active/ihab/research_new/dino_wm/train_HJ_dubinslatent_withfinetune.py" --dino_ckpt_dir "/storage1/fs1/sibai/Active/ihab/research_new/checkpt_dino/outputs/dubins/fully trained(prop repeated 3 times)" --config train_HJ_configs.yaml --dino_encoder scratch  --nx 50 --ny 50 --step-per-epoch 200 --total-episodes 200 --batch_size-pyhj 64 --gamma-pyhj 0.99
+
+# python "/storage1/fs1/sibai/Active/ihab/research_new/dino_wm/train_HJ_dubinslatent_withfinetune.py" --dino_ckpt_dir "/storage1/fs1/sibai/Active/ihab/research_new/checkpt_dino/outputs/dubins/fully trained(prop repeated 3 times)" --config train_HJ_configs.yaml --dino_encoder dino --with_finetune --encoder_lr 1e-3 --nx 50 --ny 50 --step-per-epoch 200 --total-episodes 200 --batch_size-pyhj 64 --gamma-pyhj 0.99
+# python "/storage1/fs1/sibai/Active/ihab/research_new/dino_wm/train_HJ_dubinslatent_withfinetune.py" --dino_ckpt_dir "/storage1/fs1/sibai/Active/ihab/research_new/checkpt_dino/outputs/dubins/fully trained(prop repeated 3 times)" --config train_HJ_configs.yaml --dino_encoder dino  --nx 50 --ny 50 --step-per-epoch 200 --total-episodes 200 --batch_size-pyhj 64 --gamma-pyhj 0.99

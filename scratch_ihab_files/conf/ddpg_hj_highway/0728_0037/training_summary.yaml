@@ -1,0 +1,4 @@
+final_buffer_size: 40000
+model_path: /storage1/fs1/sibai/Active/ihab/research_new/dino_wm/scratch_ihab_files/conf/ddpg_hj_highway/0728_0037/epoch_300
+timestamp: 0728_0037
+total_episodes: 300

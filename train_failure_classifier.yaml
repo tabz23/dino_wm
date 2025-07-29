@@ -1,10 +1,13 @@
-data_path: "/storage1/fs1/sibai/Active/ihab/research_new/data_for_failure_classifier" # data path for data with labels
+data_path: "/storage1/fs1/sibai/Active/ihab/research_new/datasets_dino" # data path for data with labels
+save_path: "/storage1/fs1/sibai/Active/ihab/research_new/checkpt_dino/classifier"
 freeze_wm: True
-single_layer_classifier: False
+# single_layer_classifier: False
+with_proprio: True
 latent_dim: 512 # will calculate automatically in the next update
-eval_freq: 10 # how often to evaluate the model during training
+eval_freq: 500 # how often to evaluate the model during training
 lr: 1e-4
 weight_decay: 1e-5
-batch_size: 128
-epochs: 100
+batch_size: 64
+epochs: 2
 device: "cuda:0"
+seed: 0

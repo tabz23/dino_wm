@@ -1,0 +1,4 @@
+final_buffer_size: 40000
+model_path: runs/ddpg_hj_highway/0726_0540/epoch_200
+timestamp: '0726_0540'
+total_episodes: 200

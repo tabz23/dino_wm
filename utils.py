@@ -91,3 +91,42 @@ def pil_loader(path):
     with open(path, "rb") as f:
         with Image.open(f) as img:
             return img.convert("RGB")
+
+def load_dreamer():
+    import sys
+    import pathlib
+    sys.path.append("/storage1/sibai/Active/ihab/research_new/SafeDreamer/dreamerv3-torch")
+    from dreamer_nom import Dreamer
+    import tools
+    import yaml
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--configs", nargs="+")
+    configs = yaml.safe_load(
+            (pathlib.Path("/storage1/sibai/Active/ihab/research_new/SafeDreamer/hj/configs.yaml")).read_text()
+        )
+
+    def recursive_update(base, update):
+        for key, value in update.items():
+            if isinstance(value, dict) and key in base:
+                recursive_update(base[key], value)
+            else:
+                base[key] = value
+
+    name_list = ["defaults", "safe_gymnasium"]
+    defaults = {}
+    for name in name_list:
+        recursive_update(defaults, configs[name])
+
+    for key, value in sorted(defaults.items(), key=lambda x: x[0]):
+        parser.add_argument(f"--{key}", type=tools.args_type(value), default=tools.args_type(value)(value))
+
+    config = parser.parse_args()
+    from env.cargoal.CarGoal import CarGoal
+    env = CarGoal()
+    config.num_actions = env.action_space.shape[0]
+    agent = Dreamer(env.observation_space, env.action_space, config, None, None).to(config.device)
+
+    # Load pre-trained weights
+    ckpt = torch.load("/storage1/sibai/Active/ihab/research_new/SafeDreamer/hj/reaching (1).pt")
+    agent.load_state_dict(ckpt["agent_state_dict"])
+    return agent

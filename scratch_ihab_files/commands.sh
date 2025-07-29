@@ -8,11 +8,11 @@
 source activate
 conda activate dino_wm
 cd /storage1/sibai/Active/ihab/research_new/dino_wm
-export DATASET_DIR=/storage1/sibai/Active/ihab/research_new/datasets_dino
+export DATASET_DIR=/storage1/sibai/Active/ihab/research_new/datasets_dino\
 export TORCH_HOME=/storage1/sibai/Active/ihab/tmp/torch
 # export HOME=/storage1/sibai/Active/ihab/tmp/
 
-python python "/storage1/sibai/Active/ihab/research_new/dino_wm/env/maniskill/maniskill_generatedata.py"
+python /storage1/sibai/Active/ihab/research_new/SafeDreamer/hj/generate_cargoal_data_dino.py
 
 # python train.py --config-name "train.yaml" env=dubins frameskip=5 num_hist=3
 # accelerate launch train.py --config-name "train copy.yaml" env=pusht frameskip=5 num_hist=3

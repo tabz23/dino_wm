@@ -18,7 +18,7 @@ from PyHJ.utils.net.continuous import Actor, Critic
 from PyHJ.policy import avoid_DDPGPolicy_annealing
 # Load your DINO-WM via plan.load_model
 from plan import load_model
-
+from datasets.img_transforms import default_transform
 # import sys, os
 # from pathlib import Path
 # # 1) add dino_wm folder first
@@ -31,7 +31,7 @@ from plan import load_model
 
 
 # Underlying Dubins Gym env (classic Gym)
-import mani_skill.envs
+from env.cargoal.CarGoal import CarGoal
 from gymnasium.spaces import Box
 
 import yaml
@@ -67,7 +67,7 @@ def get_args_and_merge_config():
     parser = argparse.ArgumentParser("DDPG HJ on DINO latent Dubins")
     parser.add_argument(
         "--dino_ckpt_dir", type=str,
-        default="/storage1/sibai/Active/ihab/research_new/checkpt_dino/outputs2/maniskill",
+        default="/storage1/sibai/Active/ihab/research_new/checkpt_dino/outputs2/cargoal",
         # default="/storage1/fs1/sibai/Active/ihab/research_new/checkpt_dino/outputs2/maniskill",
         help="Where to find the DINO-WM checkpoints"
     )
@@ -118,24 +118,20 @@ class LatentManiskillEnv(gym.Env):
     def __init__(self, args, wm, device: str, with_proprio: bool, latent_h = False):
         super().__init__()
         # underlying Gym env
-        self.env = gym.make("UnitreeG1PlaceAppleInBowl-v1", obs_mode = "state", sensor_configs = dict(width = 224, height = 224))
+        self.env = CarGoal()
         self.device = torch.device(device)
         self.latent_h = latent_h
         self.wm = wm
         self.wm.eval()
         # probe a reset to set spaces
-        self.env.reset()
-        image = self.env.unwrapped.render_sensors().squeeze(0)[:, -224:, :]
-        state  = self.env.get_state()
+        reset_out = self.env.reset()
+        frame = self.env._env.task.render(224, 224, mode="rgb_array", camera_name="vision", cost={})
+        # frame = self.env._env.task.render(128, 128, mode="rgb_array", camera_name="vision", cost={})
+        # Gym reset returns obs; if obs is tuple unpack
         obs = {
-            'proprio': state[0][39:89],
-            'visual': image
+            'proprio': reset_out["vector"][:24],
+            'visual': frame
         }
-        if latent_h:
-            for k, v in obs.items():
-                obs[k] = v.to(args.device).squeeze(1)
-            from train_failure_classifier import FailureClassifier
-            self.fc = FailureClassifier(obs, self.wm, args).to(self.device)
         self.with_proprio = with_proprio
         print("using proprio:", self.with_proprio)
         z = self._encode(obs)
@@ -149,35 +145,16 @@ class LatentManiskillEnv(gym.Env):
         Reset underlying Gym env and encode obs to latent.
         Returns: (obs_latent, info_dict)
         """
-        s, info = self.env.reset()
-        image = self.env.unwrapped.render_sensors().squeeze(0)[:, -224:, :]
-        state  = self.env.get_state()
+        reset_out = self.env.reset()
+        frame = self.env._env.task.render(224, 224, mode="rgb_array", camera_name="vision", cost={})
+        # frame = self.env._env.task.render(128, 128, mode="rgb_array", camera_name="vision", cost={})
+        # Gym reset returns obs; if obs is tuple unpack
         obs = {
-            'proprio': state[0][39:89],
-            'visual': image
+            'proprio': reset_out["vector"][:24],
+            'visual': frame
         }
         z = self._encode(obs)
-        return z, {"state":s}
-        # return z, {}
-
-    def calculate_cost(self, collision_threshold = 1e-6):
-        #Get objects from environment
-        bowl = self.env.unwrapped.bowl
-        scene = self.env.unwrapped.scene
-        robot = self.env.unwrapped.agent.robot
-
-        #Find correct hand link
-        all_links = robot.get_links()
-        right_hand_link = next((link for link in all_links if link.name == 'right_palm_link'), None)
-        contact_forces = scene.get_pairwise_contact_forces(right_hand_link, bowl)
-        if contact_forces is not None and len(contact_forces) > 0:
-            forces_magnitudes = torch.norm(contact_forces, dim = -1)
-            total_force = torch.sum(forces_magnitudes).item()
-            #Returns 1.0 if collision detected
-            if total_force > collision_threshold:
-                return 1.0
-            
-        return 0.0
+        return z, {}
 
     def step(self, action):
         """
@@ -186,30 +163,19 @@ class LatentManiskillEnv(gym.Env):
         We map done->terminated and truncated=False.
         Reward is taken from info['h'].
         """
-        obs, reward, truncated, terminated, info = self.env.step(action)
-        info["state"] = obs
-        visual = self.env.unwrapped.render_sensors().squeeze(0)[:, -224:, :]
-        state = self.env.get_state()
-        proprio = state[0][39:89]
-        obs = {'visual' : visual, 'proprio': proprio}
+        obs_raw, cost, done, info = self.env.step(action)
+        frame = self.env._env.task.render(224, 224, mode="rgb_array", camera_name="vision", cost={})
+        # frame = self.env._env.task.render(128, 128, mode="rgb_array", camera_name="vision", cost={})
+        truncated = False
+        # extract obs if tuple
+        obs = {
+            'proprio': obs_raw["vector"][:24],
+            'visual': frame
+        }
+        # override reward with safety metric
+        h_s = cost ##I multiplied by 3 to make HJ easier to learn
         z_next = self._encode(obs)
-        if self.latent_h:
-            visual = obs['visual']
-            proprio = obs['proprio']
-            with torch.no_grad():
-            # prepare tensors
-                visual_np = visual.permute(2, 0, 1).float()/255  # (C, H, W)=
-                vis_t = visual_np.unsqueeze(0)  # -> (1, C, H, W)
-                vis_t = vis_t.unsqueeze(1)  # Add time dimension (1, 1, C, H, W)
-                vis_t = vis_t.to(self.device)
-
-                prop_t = proprio.unsqueeze(0).to(self.device)
-                prop_t = prop_t.unsqueeze(1)  # Add singleton dimension (1, 1, D_prop)
-            obs = [vis_t,prop_t]
-            h_s = self.fc(obs).flatten().cpu().numpy()[0]
-        else:
-            h_s = self.calculate_cost()
-        return z_next, h_s, terminated, truncated, info
+        return z_next, h_s, done, truncated, info
 
     def _encode(self, obs):
         """
@@ -227,12 +193,14 @@ class LatentManiskillEnv(gym.Env):
         
         with torch.no_grad():
             # prepare tensors
-            visual_np = visual.permute(2, 0, 1).float()/255  # (C, H, W)=
-            vis_t = visual_np.unsqueeze(0)  # -> (1, C, H, W)
+            visual_np = np.transpose(visual, (2, 0, 1)).astype(np.float32)  # (C, H, W)
+            visual_np /= 255.0 
+            visual_np = (visual_np - 0.5) / 0.5
+            vis_t = torch.from_numpy(visual_np).unsqueeze(0)  # -> (1, C, H, W)
             vis_t = vis_t.unsqueeze(1)  # Add time dimension (1, 1, C, H, W)
             vis_t = vis_t.to(self.device)
-
-            prop_t = proprio.unsqueeze(0).to(self.device)
+            # vis_t = default_transform(vis_t)
+            prop_t = torch.from_numpy(proprio.astype(np.float32)).unsqueeze(0).to(self.device)
             prop_t = prop_t.unsqueeze(1)  # Add singleton dimension (1, 1, D_prop)
             
             data = {'visual': vis_t, 'proprio': prop_t}
@@ -320,7 +288,7 @@ def main():
     import wandb
     from datetime import datetime
     timestamp = datetime.now().strftime("%m%d_%H%M")
-    wandb.init(project=f"ddpg-hj-latent-mani", name=f"ddpg-{args.dino_encoder}-{timestamp}" ,config=vars(args))
+    wandb.init(project=f"ddpg-hj-latent-cargoal", name=f"ddpg-{args.dino_encoder}-{timestamp}" ,config=vars(args))
     writer    = SummaryWriter(log_dir=f"runs/ddpg_hj_latent/{args.dino_encoder}-{timestamp}/logs")
     wb_logger = WandbLogger()
     wb_logger.load(writer)    # must load the TB writer
@@ -406,17 +374,9 @@ def main():
 
     # 9) collectors
     buffer          = VectorReplayBuffer(args.buffer_size, args.training_num)
-    train_collector = CollectorMani(policy, train_envs, buffer, exploration_noise=True)
+    train_collector = Collector(policy, train_envs, buffer, exploration_noise=True)
     print("collecting some data first")
-    if args.expert_warmup:
-        from env.maniskill.maniskill_generatedata_classifier import CheckpointController
-        from PyHJ.data import CollectorForNonStandardPolicy
-        expert_policy = CheckpointController(args.expert_ckpt_path,gym.make("UnitreeG1PlaceAppleInBowl-v1", obs_mode = "state", sensor_configs = dict(width = 224, height = 224)))
-        expert_collector = CollectorForNonStandardPolicy(expert_policy, test_envs, buffer, exploration_noise=True)
-        # expert_collector = Collector(policy, train_envs, buffer, exploration_noise=True)
-        expert_collector.collect(1000)
-    else:
-        train_collector.collect(1000)
+    train_collector.collect(1000)
     print("done collecting some data first")
     # test_collector  = Collector(policy, test_envs)
 
