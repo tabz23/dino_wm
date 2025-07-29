@@ -124,10 +124,6 @@ def smart_controller(state):
         center_correction = -center_diff * 0.2  # Negative for right, positive for left
         steer = np.clip(steer + center_correction, -0.5, 0.5)
     
-    # COLLISION AVOIDANCE with other cars
-    collision_distance = 1.2  # Distance to start avoiding
-    avoidance_strength = 0.4
-    
     # SPEED CONTROL
     target_speed = 2.0  # Moderate forward speed
     speed_diff = target_speed - ego_vel
@@ -535,7 +531,7 @@ def simulate_with_hj_policy(hj_evaluator, mode="hj_only", max_steps=400, save_vi
             # next_hj_value = hj_evaluator.get_hj_value_with_action(state, smart_action)
             next_hj_value = hj_evaluator.get_hj_value(temp_state)
             # If next state would be unsafe (HJ < 0), use HJ policy instead
-            if next_hj_value < 0:
+            if next_hj_value < 5:
                 action = hj_evaluator.get_safe_action(state)
                 env.using_hj_control = True
                 hj_interventions += 1
@@ -615,16 +611,16 @@ def simulate_with_hj_policy(hj_evaluator, mode="hj_only", max_steps=400, save_vi
 def main():
     parser = argparse.ArgumentParser(description="Evaluate HJ policy on Highway environment")
     parser.add_argument('--checkpoint_path', type=str, 
-                        default="/storage1/fs1/sibai/Active/ihab/research_new/dino_wm/scratch_ihab_files/conf/ddpg_hj_highway/0726_0540/epoch_200",
+                        default="/storage1/fs1/sibai/Active/ihab/research_new/dino_wm/scratch_ihab_files/conf/ddpg_hj_highway/0728_0037/epoch_300",
                         help='Path to checkpoint directory')
     parser.add_argument('--video_path', type=str,
                         default="/storage1/fs1/sibai/Active/ihab/research_new/dino_wm/scratch_ihab_files/conf/vids",
                         help='Path to save videos')
-    parser.add_argument('--mode', type=str, choices=['hj_only', 'switching', 'both'], default='both',
+    parser.add_argument('--mode', type=str, choices=['hj_only', 'switching', 'both'], default='switching',
                         help='Simulation mode: hj_only, switching, or both')
-    parser.add_argument('--num_runs', type=int, default=3, help='Number of runs per mode')
+    parser.add_argument('--num_runs', type=int, default=10, help='Number of runs per mode')
     parser.add_argument('--max_steps', type=int, default=400, help='Maximum steps per simulation')
-    parser.add_argument('--seed', type=int, default=42, help='Random seed')
+    parser.add_argument('--seed', type=int, default=43, help='Random seed')
     parser.add_argument('--no_video', action='store_true', help='Disable video saving')
     
     args = parser.parse_args()

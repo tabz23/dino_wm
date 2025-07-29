@@ -597,7 +597,7 @@ class ParallelEnvCollector:
                         next_action = self.policy.actor(next_state_tensor)
                         next_hj_value = self.policy.critic(next_state_tensor, next_action).squeeze().cpu().numpy()
                     
-                    # Check both HJ safety and velocity constraint
+                    # Check hj safety
                     if next_hj_value < 0:
                         # Switch to pure HJ safe action (no exploration/noise)
                         with torch.no_grad():
