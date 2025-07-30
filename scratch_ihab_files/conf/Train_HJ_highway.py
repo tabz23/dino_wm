@@ -118,10 +118,7 @@ def smart_controller(state):
         center_diff = road_center - ego_pos[0]  # positive if we need to go right
         center_correction = -center_diff * 0.2  # Negative for right, positive for left
         steer = np.clip(steer + center_correction, -0.5, 0.5)
-    
-    # COLLISION AVOIDANCE with other cars
-    collision_distance = 1.2  # Distance to start avoiding
-    avoidance_strength = 0.4
+
     
     # SPEED CONTROL
     target_speed = 2.0  # Moderate forward speed

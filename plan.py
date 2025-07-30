@@ -516,3 +516,9 @@ def main(cfg: OmegaConf):
 
 if __name__ == "__main__":
     main()
+
+
+
+
+
+# python plan.py --config-name plan_dubins.yaml model_name=dino

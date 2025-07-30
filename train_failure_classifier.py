@@ -226,10 +226,12 @@ def train(fc, train_dataloader, val_dataloader, args, logger):
             if args.single_layer_classifier:
                 loss = torch.nn.functional.cross_entropy(logits, labels)
             else:
-                labels[labels == 1] = -1
-                labels[labels == 0] = 1
-                labels = labels.float()
-                loss = torch.nn.functional.mse_loss(logits,labels)
+                logits_safe = logits[labels == 0]
+                logits_unsafe = logits[labels == 1]
+                loss_safe = torch.nn.functional.relu(0.75 - logits_safe) if logits_safe.shape[0] > 0 else 0
+                loss_unsafe = torch.nn.functional.relu(logits_unsafe + 0.75) if logits_unsafe.shape[0] > 0 else 0
+                loss_unsafe_weak = torch.nn.functional.relu(logits_unsafe) if logits_unsafe.shape[0] > 0 else 0
+                loss = loss_safe.mean() + loss_unsafe.mean() + 0*loss_unsafe_weak.mean()
             train_stats['loss'].append(loss.item())
             loss.backward()
             optimizer.step()
@@ -275,11 +277,13 @@ def test(fc, test_dataloader, args, logger):
         if args.single_layer_classifier:
             loss = torch.nn.functional.cross_entropy(total_logits, total_labels)/len(test_dataloader)
         else:
-            targets = deepcopy(total_labels)
-            targets[targets == 0] = 1
-            targets[targets == 1] = -1
-            loss = torch.nn.functional.mse_loss(total_logits,targets.float())
-        eval_stats['loss'] = loss.item()
+            logits_safe = total_logits[total_labels == 0]
+            logits_unsafe = total_logits[total_labels == 1]
+            loss_safe = torch.nn.functional.relu(0.75 - logits_safe) if logits_safe.shape[0] > 0 else 0
+            loss_unsafe = torch.nn.functional.relu(logits_unsafe + 0.75) if logits_unsafe.shape[0] > 0 else 0
+            loss_unsafe_weak = torch.nn.functional.relu(logits_unsafe) if logits_unsafe.shape[0] > 0 else 0
+            loss = loss_safe.mean() + loss_unsafe.mean() + 0*loss_unsafe_weak.mean()
+        eval_stats['val_loss'] = loss.item()
         acc = (total_preds == total_labels).float().mean().item()
         total_preds = total_preds.detach().cpu().numpy()
         total_labels = total_labels.detach().cpu().numpy()
