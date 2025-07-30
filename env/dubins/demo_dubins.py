@@ -1,21 +1,41 @@
 import cv2
-from dubins_wrapper import DubinsWrapper
+import os
+from env.dubins.dubins_wrapper import DubinsWrapper
 
 if __name__ == '__main__':
+    # Video output path and directory setup
+    output_path = '/storage1/fs1/sibai/Active/ihab/research_new/dino_wm/env/dubins/rollout.mp4'
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+
+    # Initialize environment
     env = DubinsWrapper(seed=0)
     init_state, goal_state = env.sample_random_init_goal_states(seed=42)
     obs, state = env.prepare(0, init_state)
+
+    # Determine frame size from first observation
+    height, width = obs['visual'].shape[:2]
+
+    # Set up VideoWriter for 1 fps
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    writer = cv2.VideoWriter(output_path, fourcc, 1.0, (width, height))
+
+    # Optionally print initial state info
     print('Initial full state:', state)
     print('Initial proprio (agent):', obs['proprio'])
     print('Initial h:', env.compute_h(state))
-    cv2.imshow('step0', obs['visual']); cv2.waitKey(500)
-    for t in range(1, 1010):
+
+    # Write first frame
+    writer.write(obs['visual'])
+
+    # Step through the environment and write each frame
+    for t in range(1, 60):
         action = env.action_space.sample()
         obs, reward, done, info = env.step(action)
-        print(f'Step {t} full state:', info['state'])
-        print('  proprio:', obs['proprio'], 'h:', info['h'])
-        cv2.imshow('step', obs['visual'])
-        if cv2.waitKey(200) & 0xFF == 27 or done:
-            print('Done:', done)
+        writer.write(obs['visual'])
+        if done:
+            print('Done at step', t)
             break
-    cv2.destroyAllWindows()
+
+    # Finalize video file
+    writer.release()
+    print(f'Video saved to {output_path}')
