@@ -670,7 +670,7 @@ def main():
         actor_gradient_steps=getattr(args, 'actor_gradient_steps', 1),
         action_space=train_envs[0].action_space
     )
-    print("args.with_proprio",args.with_proprio)
+
     # Use optimized replay buffer
     buffer = OptimizedReplayBuffer(args.buffer_size, device, dummy_obs, action_dim)
 

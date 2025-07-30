@@ -104,9 +104,9 @@ def smart_controller(state):
     # Ensure theta stays within environment bounds [π/4, 3π/4]
     theta_min, theta_max = np.pi / 4, 3 * np.pi / 4
     if ego_theta < theta_min:
-        steer = max(steer, 0.8)  # Turn left to increase theta
+        steer = max(steer, 0.5)  # Turn left to increase theta
     elif ego_theta > theta_max:
-        steer = min(steer, -0.8)  # Turn right to decrease theta
+        steer = min(steer, -0.5)  # Turn right to decrease theta
     
     # BOUNDARY AVOIDANCE (highest priority)
     road_center = 1.0  # center of road (x = 1.0)

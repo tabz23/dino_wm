@@ -28,8 +28,8 @@ from env.dubins.dubins import DubinsEnv
 from gymnasium.spaces import Box
 
 # Set up matplotlib config
-os.environ['MPLCONFIGDIR'] = '/storage1/fs1/sibai/Active/ihab/tmp'
-os.environ['MUJOCO_GL'] = 'osmesa'
+os.environ['MPLCONFIGDIR'] = '/storage1/sibai/Active/ihab/tmp'
+os.environ['MUJOCO_GL'] = 'egl'
 os.makedirs(os.environ['MPLCONFIGDIR'], exist_ok=True)
 
 def args_type(default):
@@ -55,7 +55,7 @@ def get_args_and_merge_config():
     parser = argparse.ArgumentParser("DDPG HJ on DINO latent Dubins")
     parser.add_argument(
         "--dino_ckpt_dir", type=str,
-        default="/storage1/fs1/sibai/Active/ihab/research_new/checkpt_dino/outputs2/cargoal",
+        default="/storage1/sibai/Active/ihab/research_new/checkpt_dino/outputs2/cargoal",
         help="Where to find the DINO-WM checkpoints"
     )
     parser.add_argument(
@@ -440,7 +440,7 @@ class AvoidDDPGPolicy:
             "grad_norm": grad_norm if with_finetune else 0.0
         }
 
-    def exploration_noise(self, wm, act, batch_obs):
+    def exploration_noise(self, act, batch_obs):
         """
         Exact replication of original exploration_noise method.
         Note: In original, this is called with (act, batch) where batch contains obs
@@ -459,7 +459,7 @@ class AvoidDDPGPolicy:
             rand_act = np.random.uniform(self.action_low, self.action_high, act.shape)
             
             # Encode observations for critic evaluation
-            z = encode_batch_optimized(batch_obs, wm, self.device, self.with_proprio, requires_grad=False)
+            z = encode_batch_optimized(batch_obs, self.shared_wm, self.device, self.with_proprio, requires_grad=False)
             rand_act_tensor = torch.from_numpy(rand_act).float().to(self.device)
             
             with torch.no_grad():
@@ -483,71 +483,56 @@ class AvoidDDPGPolicy:
 
 class ParallelEnvCollector:
     """Collects transitions from multiple envs in parallel with safety switching"""
-    def __init__(self, envs, dreamer_agent, shared_wm, with_proprio, policy, device):
+    def __init__(self, envs, dreamer_agent, policy, device):
         self.envs = envs
         self.policy = policy
         self.device = device
         self.dreamer_agent = dreamer_agent
-        self.shared_wm = shared_wm
-        self.with_proprio = with_proprio
         self.num_envs = len(envs)
 
-    def collect_trajectories(self, buffer, max_steps: int=1000, use_dreamer=False):
+    def collect_trajectories(self, buffer, max_steps: int=1000):
         """Collect transitions using smart controller with HJ safety switching"""
         reset_out = [env.reset() for env in self.envs]
         obs_list = [out[0] for out in reset_out]
         info_list = [out[1] for out in reset_out]
         done_flags = [False] * self.num_envs
         steps = 0
+        
+        # Track switching statistics
+        total_smart_actions = 0
+        total_hj_interventions = 0
+        
+        # Decide which envs will use switching vs pure HJ
+        # Half use switching (smart + HJ safety), half use pure HJ for diversity
+        use_switching = [i % 2 == 0 for i in range(self.num_envs)]
 
         while steps < max_steps:
             active_idxs = [i for i, d in enumerate(done_flags) if not d]
             if not active_idxs:
                 for i in range(self.num_envs):
-                    reset_out = self.envs[i].reset()
-                    obs_list[i] = reset_out[0]
-                    info_list[i] = reset_out[1]
+                    obs_list[i] = self.envs[i].reset()[0]
                     done_flags[i] = False
                 continue
 
-           # 3) batch‑encode only active observations
-            if use_dreamer:
-                active_info = [info_list[i] for i in active_idxs]
-                active_info_dreamer = [info["input_dreamer"] for info in active_info]
-                dreamer_input = {}
-                for k in active_info_dreamer[0].keys():
-                    dreamer_input[k] = np.concatenate([info[k] for info in active_info_dreamer],axis=0)
-                action_dict, agent_state, _ = self.dreamer_agent(dreamer_input, None)
-                actions = action_dict["action"].cpu().numpy()
-            else:
-                active_obs = [obs_list[i] for i in active_idxs]
-                z = encode_batch_optimized(active_obs,
-                                        self.shared_wm,
-                                        self.device,
-                                        self.with_proprio,
-                                        requires_grad=False)
-                
-                # 4) Get actions from actor (without noise first)
-                with torch.no_grad():
-                    raw_actions = self.policy.actor(z).cpu().numpy()
-
-                # 5) Apply exact same exploration as original
-                # Note: pass active_obs as the batch argument
-                actions = self.policy.exploration_noise(self.shared_wm, raw_actions, active_obs)
-                
-                # Clip actions to valid range
-            actions = np.clip(actions, 
-                self.envs[0].action_space.low, 
-                self.envs[0].action_space.high)
-
-            # 6) step each active env and store transitions
+            # Get actions for active envs
             for idx, env_idx in enumerate(active_idxs):
                 env = self.envs[env_idx]
-                action = actions[idx]
+                obs = obs_list[env_idx]
+                info = info_list[env_idx]
+                
+                if use_switching[env_idx]:
+                    # Smart controller with HJ safety switching
+                    action_dict, agent_state, _ = self.dreamer_agent(info["input_dreamer"], None)
+                    action = action_dict["action"].cpu().numpy()[0]
+                else:
+                    # Pure HJ policy with exploration
+                    action = self.policy.exploration_action(obs, use_smart_controller=False)
+                
+                # Step environment with chosen action
                 obs_next, rew, terminated, truncated, info = env.step(action)
                 done = terminated or truncated
 
-                buffer.add(obs_list[env_idx], action, rew, obs_next, done)
+                buffer.add(obs, action, rew, obs_next, done)
                 steps += 1
                 obs_list[env_idx] = obs_next
                 info_list[env_idx] = info
@@ -555,6 +540,14 @@ class ParallelEnvCollector:
 
                 if steps >= max_steps:
                     break
+        
+        # Print switching statistics every collection
+        if use_switching.count(True) > 0:
+            switching_steps = total_smart_actions + total_hj_interventions
+            if switching_steps > 0:
+                intervention_rate = 100 * total_hj_interventions / switching_steps
+                print(f"  Collection stats: {total_smart_actions} smart actions, "
+                      f"{total_hj_interventions} HJ interventions ({intervention_rate:.1f}%)")
 
 def main():
     args = get_args_and_merge_config()
@@ -634,14 +627,14 @@ def main():
 
     # Initialize parallel collector
     deamer_agent = load_dreamer()
-    collector = ParallelEnvCollector(train_envs, deamer_agent, shared_wm, args.with_proprio, policy, device)
+    collector = ParallelEnvCollector(train_envs, deamer_agent, policy, device)
 
     timestamp = datetime.now().strftime("%m%d_%H%M")
     log_dir = Path(f"runs/ddpg_hj_latent/{args.dino_encoder}-{timestamp}/")
     log_dir.mkdir(parents=True, exist_ok=True)
     
     wandb.init(
-        project=f"ddpg-hj-latent-cargoal",
+        project=f"ddpg-hj-latent-dubins",
         name=f"ddpg-{args.dino_encoder}-{timestamp}",
         config=vars(args)
     )
@@ -650,12 +643,8 @@ def main():
 
     # Warm up buffer more efficiently
     print(f"Warming up replay buffer (need ≥ {args.batch_size_pyhj} samples)...")
-    while len(buffer) < 2500:
-        collector.collect_trajectories(buffer, use_dreamer=True)
-        print(f"Replay buffer: {len(buffer)} dreamer samples.")
     while len(buffer) < 5000:
         collector.collect_trajectories(buffer)
-        print(f"Replay buffer: {len(buffer)} samples.")
     print(f"Replay buffer: {len(buffer)} samples.")
 
     for epoch in range(1, args.total_episodes + 1):
