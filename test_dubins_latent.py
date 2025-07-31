@@ -1,7 +1,7 @@
 """
 Test learned Hamilton-Jacobi safety filter in latent space for Dubins car
 """
-
+import sys
 import os
 import argparse
 from pathlib import Path
@@ -229,31 +229,11 @@ class HJPolicyEvaluator:
                     # Stack into obs_0 format
                     visual_tensor = torch.from_numpy(np.stack(visual_list)).unsqueeze(0).to(self.device)  # (1, num_hist, C, H, W)
                     proprio_tensor = torch.from_numpy(np.stack(proprio_list)).unsqueeze(0).to(self.device)  # (1, num_hist, proprio_dim)
-                    
-                # else:
-                #     # Bootstrap with current observation repeated
-              
-                #     if visual.shape[2] == 3:  # Channels last
-                #         visual_np = np.transpose(visual, (2, 0, 1)).astype(np.float32) / 255.0
-                #     else:
-                #         visual_np = visual.astype(np.float32) / 255.0
-                    
-                #     # Apply world model normalization: [0,1] -> [-1,1] ###impimmipmimpipimipmimpipmimpipmipmipmimppimipmimpipmimpipmipmimpimpimpimpimpimpipmipmipmipmipmipmipmipmipmipimipm
-                #     visual_np = 2.0 * visual_np - 1.0
-                    
-                #     visual_list = [visual_np] * self.num_hist
-                #     proprio_list = [proprio] * self.num_hist
-                    
-                #     visual_tensor = torch.from_numpy(np.stack(visual_list)).unsqueeze(0).to(self.device)
-                #     proprio_tensor = torch.from_numpy(np.stack(proprio_list)).unsqueeze(0).to(self.device)
-                
+
                 # Create obs_0 dictionary
                 obs_0 = {'visual': visual_tensor, 'proprio': proprio_tensor}
                 
-                # Create action tensor for rollout - this should be (1, num_hist + num_pred, action_dim)
-                # For single step prediction: num_pred = 1
-                # So we need num_hist actions (for context) + 1 action (for prediction)
-                
+
                 if len(self.obs_history) >= self.num_hist:
                     # Use historical actions + new action
                     recent_actions = self.action_history[-self.num_hist:]
@@ -270,10 +250,7 @@ class HJPolicyEvaluator:
                     
                     # Add the prediction action
                     action_list.append(action)
-                # else:
-                #     # Use zero actions for history + prediction action
-                #     zero_action = np.zeros_like(action)
-                #     action_list = [zero_action] * self.num_hist + [action]
+
                 
                 # Stack actions: (1, num_hist + 1, action_dim)
                 action_tensor = torch.from_numpy(np.stack(action_list)).unsqueeze(0).to(self.device)
@@ -287,6 +264,7 @@ class HJPolicyEvaluator:
                     print(f"  Prediction action: {action}")
                 
                 # USE THE ACTUAL ROLLOUT METHOD
+                # print(action_tensor)
                 z_obses, z_full = self.wm.rollout(obs_0=obs_0, act=action_tensor)
                 
                 if return_debug_info:
@@ -328,13 +306,7 @@ class HJPolicyEvaluator:
                         traceback.print_exc()
                         predicted_image = None
                         predicted_proprio = None
-                
-                # For HJ evaluation, we need to convert the latent back to HJ policy format
-                # The HJ policy was trained on [0,1] images, but world model latents are from [-1,1] images
-                # We need to be careful about this conversion...
-                
-                # For now, let's use the latents directly for HJ evaluation
-                # since they represent the same visual content, just encoded differently
+
                 if self.with_proprio:
                     z_vis = z_obs_next['visual'].reshape(1, -1)
                     z_prop = z_obs_next['proprio'].squeeze(1)
@@ -357,6 +329,8 @@ class HJPolicyEvaluator:
                 next_hj_value = 0.0
                 predicted_image = None
                 predicted_proprio = None
+                sys.exit(f"Fatal error in rollout prediction: {e}")
+                
         
         # Debug logging
         if return_debug_info:
@@ -480,6 +454,10 @@ def simulate_dubins_with_hj(hj_evaluator, env, mode="switching", max_steps=200,
     # Reset environment
     obs, _ = env.reset()
     
+    #CHECK IF THIS IS OKAY#CHECK IF THIS IS OKAY#CHECK IF THIS IS OKAY#CHECK IF THIS IS OKAY#CHECK IF THIS IS OKAY#CHECK IF THIS IS OKAY#CHECK IF THIS IS OKAY
+    #CHECK IF THIS IS OKAY#CHECK IF THIS IS OKAY#CHECK IF THIS IS OKAY#CHECK IF THIS IS OKAY#CHECK IF THIS IS OKAY#CHECK IF THIS IS OKAY#CHECK IF THIS IS OKAY
+    #CHECK IF THIS IS OKAY#CHECK IF THIS IS OKAY#CHECK IF THIS IS OKAY#CHECK IF THIS IS OKAY#CHECK IF THIS IS OKAY#CHECK IF THIS IS OKAY
+    #CHECK IF THIS IS OKAY#CHECK IF THIS IS OKAY#CHECK IF THIS IS OKAY#CHECK IF THIS IS OKAY#CHECK IF THIS IS OKAY
     # Initialize history with current observation and zero actions
     # Get the expected action dimension from the environment
     zero_action = np.zeros(env.action_space.shape[0], dtype=np.float32)
@@ -890,3 +868,16 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+
+
+
+
+
+
+
+
+# With only one history step the predictor has less temporal context, so its next-state prediction will generally be noisier. If you want stronger initial predictions, bootstrap the history to length num_hist, e.g. by repeating the initial observation and action (or using zeros for prior actions) so that obs_history / action_history contain num_hist entries before calling predict_next_state_value.
+
+# Be careful about alignment: act_0 = act[:, :num_obs_init] in rollout is treated as the action associated with the provided observations. Your update_history should maintain that the stored action is the one that led into the subsequent observation, so when predicting the next state from current obs with a candidate action, the history ideally contains the recent (obs, action) pairs in the same convention the model was trained on.
