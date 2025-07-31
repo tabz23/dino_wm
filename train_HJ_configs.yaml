@@ -165,9 +165,9 @@ nx: 100
 ny: 100
 
 # params for latent h
-freeze_wm: True
-single_layer_classifier: False
-with_proprio: True
-expert_warmup: True
-finetune_backbone: False
-expert_ckpt_path: "/storage1/sibai/Active/ihab/research_new/ManiSkill/examples/baselines/ppo/runs/UnitreeG1PlaceAppleInBowl-v1__ppo__8__1750699220/final_ckpt.pt"
+# freeze_wm: True
+# single_layer_classifier: False
+# with_proprio: True
+# expert_warmup: True
+# finetune_backbone: True
+# expert_ckpt_path: "/storage1/sibai/Active/ihab/research_new/ManiSkill/examples/baselines/ppo/runs/UnitreeG1PlaceAppleInBowl-v1__ppo__8__1750699220/final_ckpt.pt"

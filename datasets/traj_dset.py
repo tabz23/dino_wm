@@ -151,12 +151,12 @@ class TrajSlicerWithCostDataset(TrajDataset):
             act = act[start:end]
             act = rearrange(act, "(n f) d -> n (f d)", n=self.num_frames)  # concat actions
             cost = info["cost"][start:end:self.frameskip]
-            return tuple([obs, act, state, cost])
+            return tuple([obs, act, state, cost, info["h"][start:end:self.frameskip]])
         else:
             i, start, end = self.slices[idx]
             obs, act, state, info = self.dataset[i]
             cost = info["cost"][start:end:self.frameskip]
-            return tuple([obs, act, state, cost])
+            return tuple([obs, act, state, cost, info["h"][start:end:self.frameskip]])
 
 
 def random_split_traj(

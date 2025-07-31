@@ -24,7 +24,7 @@ class CarlaDataset(TrajDataset):
         self.states = [traj.float() for traj in torch.load(self.data_path / "states.pth")]
         self.actions = [traj.float() for traj in torch.load(self.data_path / "actions.pth")]
         self.seq_lengths = torch.load(self.data_path / "seq_lengths.pth").long()
-        self.costs = [traj.float() for traj in torch.load(self.data_path / "costs.pth")]
+        self.costs = [traj.float() for traj in torch.load(self.data_path / "distances.pth")]
 
         self.n_rollout = n_rollout
         if self.n_rollout:
@@ -94,9 +94,9 @@ class CarlaDataset(TrajDataset):
                 "proprio" : proprio_states
             }
 
-            return obs, actions, full_states, {"cost":(self.costs[idx]>0).long()}
+            return obs, actions, full_states, {"cost":((self.costs[idx]-0.1)<=0).long(),"h":self.costs[idx]}
         else:
-            return None, None, None, {"cost":(self.costs[idx]>0).long()}
+            return None, None, None, {"cost":((self.costs[idx]-0.1)<=0).long(),"h":self.costs[idx]}
         
 
     def __getitem__(self, idx):

@@ -12,6 +12,7 @@ import os
 import numpy as np
 from sklearn.metrics import confusion_matrix
 from copy import deepcopy
+from scipy.stats import pearsonr
 
 def args_type(default):
     def parse_string(x):
@@ -209,44 +210,106 @@ def load_data(
 
 def train(fc, train_dataloader, val_dataloader, args, logger):
     optimizer = torch.optim.Adam(fc.parameters(), lr=float(args.lr), weight_decay=float(args.weight_decay))
-    train_stats = {'loss':[]}
-    val_stats = {'val_loss':[], 'val_accuracy':[],'TN':[],'FP':[],'FN':[],'TP':[],'Safe ACC':[],'Unsafe ACC':[]}
+    train_stats = {'loss':[],'loss_safe':[],'loss_unsafe':[],'loss_unsafe_weak':[],'loss_gradient_penalty':[]}
+    val_stats = {}
     fc.train()
     for _ in trange(args.epochs):
-        for idx, batch in enumerate(tqdm(train_dataloader)):
+        pbar = tqdm(train_dataloader)
+        for idx, batch in enumerate(pbar):
             optimizer.zero_grad()
-            obs, act, state, cost = batch
+            obs, act, state, cost, h = batch
             if cost.sum() == 0:
                 continue
             for k, v in obs.items():
                 obs[k] = v.to(args.device).squeeze(1)
             labels = cost.to(args.device).squeeze(1)
             logits = fc(obs)
-            # print(labels.sum(),labels.shape[0]-labels.sum(),labels.sum()/labels.shape[0])
             if args.single_layer_classifier:
                 loss = torch.nn.functional.cross_entropy(logits, labels)
             else:
-                labels[labels == 1] = -1
-                labels[labels == 0] = 1
-                labels = labels.float()
-                loss = torch.nn.functional.mse_loss(logits,labels)
+                logits_safe = logits[labels == 0]
+                logits_unsafe = logits[labels == 1]
+                loss_safe = torch.nn.functional.relu(0.75 - logits_safe) if logits_safe.shape[0] > 0 else 0
+                loss_unsafe = torch.nn.functional.relu(logits_unsafe + 0.75) if logits_unsafe.shape[0] > 0 else 0
+                loss_unsafe_weak = torch.nn.functional.relu(logits_unsafe) if logits_unsafe.shape[0] > 0 else 0
+                pred = torch.zeros_like(logits)
+                pred[logits <= 0] = 1
+                pred[logits > 0] = 0
+                pred = pred.to(args.device).squeeze(1)
+                acc = (pred == labels).float().mean().item()
+                cm = confusion_matrix(labels.detach().cpu().numpy(), pred.detach().cpu().numpy())
+                tn, fp, fn, tp = cm.ravel()
+                h = h.to(args.device).squeeze(1)
+                cosine_similarity = torch.nn.functional.cosine_similarity(h, logits.squeeze(-1), dim=-1).squeeze(-1)
+                h_np = h.detach().cpu().numpy().reshape(-1)
+                logits_np = logits.detach().cpu().numpy().reshape(-1)
+                pearson_corr, pearson_pval = pearsonr(h_np, logits_np)
+                if args.gradient_penalty:
+                    obs_safe = {k:v[labels == 0] for k, v in obs.items()}
+                    obs_unsafe = {k:v[labels == 1] for k, v in obs.items()}
+                    z_safe = fc.encode(obs_safe)
+                    z_unsafe = fc.encode(obs_unsafe)
+                    N = min(z_safe.shape[0], z_unsafe.shape[0])
+                    z_safe = z_safe[:N]
+                    z_unsafe = z_unsafe[:N]
+                    alpha = torch.rand(z_safe.shape[0], 1, device=args.device)
+                    interpolated_z = alpha * z_safe + (1 - alpha) * z_unsafe
+                    interpolated_z.requires_grad = True
+                    h_interpolated = fc.head(interpolated_z)
+                    gradient = torch.autograd.grad(h_interpolated, interpolated_z, grad_outputs=torch.ones_like(h_interpolated), create_graph=True, retain_graph=True, only_inputs=True)[0]
+                    gradient_norm = gradient.norm(2, dim=1)
+                    loss_gradient_penalty = (gradient_norm - 2.1)**2
+                    loss = loss_safe.mean() + loss_unsafe.mean() + 0*loss_unsafe_weak.mean() + args.gp_weight * loss_gradient_penalty.mean()
+                else:
+                    loss = loss_safe.mean() + loss_unsafe.mean() + 0*loss_unsafe_weak.mean()
+                pbar.set_postfix(loss=loss.item(),loss_safe=loss_safe.mean().item(),loss_unsafe=loss_unsafe.mean().item(),loss_gradient_penalty=loss_gradient_penalty.mean().item() if args.gradient_penalty else 0,acc=acc)
             train_stats['loss'].append(loss.item())
+            # train_stats['loss_unsafe_weak'].append(loss_unsafe_weak.mean().item())
+            if args.gradient_penalty:
+                train_stats['loss_gradient_penalty'].append(loss_gradient_penalty.mean().item())
             loss.backward()
             optimizer.step()
-            logger.log({"train_loss":loss.item()})
-            # if (idx == 100) or ((idx + 1) % args.eval_freq == 0):
+            if not args.single_layer_classifier:
+                train_stats['loss_safe'].append(loss_safe.mean().item())
+                train_stats['loss_unsafe'].append(loss_unsafe.mean().item())
+                logger.log({"loss/train_loss_safe":loss_safe.mean().item()})
+                logger.log({"loss/train_loss_unsafe":loss_unsafe.mean().item()})
+                logger.log({"acc_train/accuracy":acc})
+                logger.log({"acc_train/Unsafe ACC":tp / (tp + fn)})
+                logger.log({"acc_train/Safe ACC":tn / (tn + fp)})
+                logger.log({"corr_train/pearson_correlation":pearson_corr})
+                logger.log({"corr_train/pearson_pval":pearson_pval})
+                logger.log({"corr_train/cosine_similarity":cosine_similarity.item()})
+                logger.log({"cm_train/TN":tn})
+                logger.log({"cm_train/FP":fp})
+                logger.log({"cm_train/FN":fn})
+                logger.log({"cm_train/TP":tp})
+                logger.log({"h_train/h_safe_mean":logits_safe.mean().item()})
+                logger.log({"h_train/h_unsafe_mean":logits_unsafe.mean().item()})
+                logger.log({"h_train/h_safe_std":logits_safe.std().item()})
+                logger.log({"h_train/h_unsafe_std":logits_unsafe.std().item()})
+                logger.log({"h_train/h_safe_max":logits_safe.max().item()})
+                logger.log({"h_train/h_unsafe_max":logits_unsafe.max().item()})
+                logger.log({"h_train/h_safe_min":logits_safe.min().item()})
+                logger.log({"h_train/h_unsafe_min":logits_unsafe.min().item()})
+                # logger.log({"loss/train_loss_unsafe_weak":loss_unsafe_weak.mean().item()})
+                if args.gradient_penalty:
+                    logger.log({"loss/train_loss_gradient_penalty":loss_gradient_penalty.mean().item()})
+            logger.log({"loss/train_loss":loss.item()})
             if ((idx + 1) % args.eval_freq == 0):
                 stats = test(fc, val_dataloader, args, logger)
-                print(f"Loss: {stats['loss']:.4f}, Accuracy: {stats['accuracy']:.4f}")
-                val_stats['val_loss'].append(stats['loss'])
-                val_stats['val_accuracy'].append(stats['accuracy'])
-                val_stats['TN'].append(stats['TN'])
-                val_stats['TP'].append(stats['TP'])
-                val_stats['FP'].append(stats['FP'])
-                val_stats['FN'].append(stats['FN'])
-                val_stats['Unsafe ACC'].append(stats['Unsafe ACC'])
-                val_stats['Safe ACC'].append(stats['Safe ACC'])
-                logger.log(stats)
+                print(f"Epoch: {_}")
+                if not args.single_layer_classifier:
+                    print("-----------Validation-----------")
+                    print(f"Loss: {stats['loss/val_loss']:.4f}, Cosine Similarity: {stats['corr_eval/cosine_similarity']:.4f}, Pearson Correlation: {stats['corr_eval/pearson_correlation']:.4f}, Pearson P-value: {stats['corr_eval/pearson_pval']:.4f}")
+                    print(f"h_safe_mean: {stats['h_eval/h_safe_mean']:.4f}, h_safe_std: {stats['h_eval/h_safe_std']:.4f}, h_safe_max: {stats['h_eval/h_safe_max']:.4f}, h_safe_min: {stats['h_eval/h_safe_min']:.4f}")
+                    print(f"h_unsafe_mean: {stats['h_eval/h_unsafe_mean']:.4f}, h_unsafe_std: {stats['h_eval/h_unsafe_std']:.4f}, h_unsafe_max: {stats['h_eval/h_unsafe_max']:.4f}, h_unsafe_min: {stats['h_eval/h_unsafe_min']:.4f}")
+                    print(f"Unsafe ACC: {stats['acc_eval/Unsafe ACC']:.4f}, Safe ACC: {stats['acc_eval/Safe ACC']:.4f}, Accuracy: {stats['acc_eval/accuracy']:.4f}")
+                    print("--------------------------------")
+                for k, v in stats.items():
+                    if k not in val_stats.keys():
+                        val_stats[k] = []
+                    val_stats[k].append(v)
     return train_stats, val_stats
 
 def test(fc, test_dataloader, args, logger):
@@ -255,19 +318,30 @@ def test(fc, test_dataloader, args, logger):
     total_preds = torch.tensor([], dtype=torch.long, device=args.device)
     total_logits = torch.tensor([], dtype=torch.long, device=args.device)
     total_labels = torch.tensor([], dtype=torch.long, device=args.device)
+    total_z = torch.tensor([], dtype=torch.float32, device=args.device)
+    first_batch = True
     with torch.no_grad():
         for batch in test_dataloader:
-            obs, act, state, cost = batch
+            obs, act, state, cost, h = batch
             for k, v in obs.items():
                 obs[k] = v.to(args.device).squeeze(1)
             labels = cost.to(args.device).squeeze(1)
-            logits = fc(obs)
+            z = fc.encode(obs)
+            logits = fc.head(z).squeeze(1)
             if args.single_layer_classifier:
                 preds = logits.argmax(dim=-1)
             else:
                 preds = torch.zeros_like(logits)
                 preds[logits <= 0] = 1
                 preds[logits > 0] = 0
+                h = h.to(args.device).squeeze(1)
+                if first_batch and (labels > 0).sum() > 0:
+                    cosine_similarity = torch.nn.functional.cosine_similarity(h, logits, dim=-1).squeeze(-1)
+                    h_np = h.detach().cpu().numpy().reshape(-1)
+                    logits_np = logits.detach().cpu().numpy().reshape(-1)
+                    pearson_corr, pearson_pval = pearsonr(h_np, logits_np)
+                    first_batch = False
+            total_z = torch.cat((total_z, z), dim=0)
             total_preds = torch.cat((total_preds, preds), dim=0)
             total_logits = torch.cat((total_logits, logits), dim=0)
             total_labels = torch.cat((total_labels, labels), dim=0)
@@ -275,23 +349,55 @@ def test(fc, test_dataloader, args, logger):
         if args.single_layer_classifier:
             loss = torch.nn.functional.cross_entropy(total_logits, total_labels)/len(test_dataloader)
         else:
-            targets = deepcopy(total_labels)
-            targets[targets == 0] = 1
-            targets[targets == 1] = -1
-            loss = torch.nn.functional.mse_loss(total_logits,targets.float())
-        eval_stats['loss'] = loss.item()
-        acc = (total_preds == total_labels).float().mean().item()
-        total_preds = total_preds.detach().cpu().numpy()
-        total_labels = total_labels.detach().cpu().numpy()
-        cm = confusion_matrix(total_labels, total_preds)
-        tn, fp, fn, tp = cm.ravel()
-        eval_stats['TN'] = tn
-        eval_stats['FP'] = fp
-        eval_stats['FN'] = fn
-        eval_stats['TP'] = tp
-        eval_stats['Unsafe ACC'] = tp / (tp + fn)
-        eval_stats['Safe ACC'] = tn / (tn + fp)
-        eval_stats['accuracy'] = acc
+            logits_safe = total_logits[total_labels == 0]
+            logits_unsafe = total_logits[total_labels == 1]
+            loss_safe = torch.nn.functional.relu(0.75 - logits_safe) if logits_safe.shape[0] > 0 else 0
+            loss_unsafe = torch.nn.functional.relu(logits_unsafe + 0.75) if logits_unsafe.shape[0] > 0 else 0
+            loss_unsafe_weak = torch.nn.functional.relu(logits_unsafe) if logits_unsafe.shape[0] > 0 else 0
+            loss = loss_safe.mean() + loss_unsafe.mean() + 0*loss_unsafe_weak.mean()
+    if args.gradient_penalty:
+        N = min(logits_safe.shape[0], logits_unsafe.shape[0])
+        z_safe = total_z[total_labels == 0][:N]
+        z_unsafe = total_z[total_labels == 1][:N]
+        alpha = torch.rand(z_safe.shape[0], 1, device=args.device)  
+        interpolated_z = alpha * z_safe + (1 - alpha) * z_unsafe
+        interpolated_z.requires_grad = True
+        h_interpolated = fc.head(interpolated_z)
+        gradient = torch.autograd.grad(h_interpolated, interpolated_z, grad_outputs=torch.ones_like(h_interpolated), create_graph=True, retain_graph=True, only_inputs=True)[0]
+        gradient_norm = gradient.norm(2, dim=1)
+        loss_gradient_penalty = (gradient_norm - 2.1)**2
+        loss = loss_safe.mean() + loss_unsafe.mean() + 0*loss_unsafe_weak.mean() + args.gp_weight * loss_gradient_penalty.mean()
+        eval_stats['loss/val_loss_gradient_penalty'] = loss_gradient_penalty.mean().item()
+    eval_stats['loss/val_loss'] = loss.item()
+    eval_stats['loss/val_loss_safe'] = loss_safe.mean().item()
+    eval_stats['loss/val_loss_unsafe'] = loss_unsafe.mean().item()
+    # eval_stats['loss/val_loss_unsafe_weak'] = loss_unsafe_weak.mean().item()
+    acc = (total_preds == total_labels).float().mean().item()
+    logits_safe = total_logits[total_labels == 0]
+    logits_unsafe = total_logits[total_labels == 1]
+    total_preds = total_preds.detach().cpu().numpy()
+    total_labels = total_labels.detach().cpu().numpy()
+    cm = confusion_matrix(total_labels, total_preds)
+    tn, fp, fn, tp = cm.ravel()
+    eval_stats['h_eval/h_safe_mean'] = logits_safe.mean().item()
+    eval_stats['h_eval/h_unsafe_mean'] = logits_unsafe.mean().item()
+    eval_stats['h_eval/h_safe_std'] = logits_safe.std().item()
+    eval_stats['h_eval/h_unsafe_std'] = logits_unsafe.std().item()
+    eval_stats['h_eval/h_safe_max'] = logits_safe.max().item()
+    eval_stats['h_eval/h_unsafe_max'] = logits_unsafe.max().item()
+    eval_stats['h_eval/h_safe_min'] = logits_safe.min().item()
+    eval_stats['h_eval/h_unsafe_min'] = logits_unsafe.min().item()
+    eval_stats['corr_eval/cosine_similarity'] = cosine_similarity.item()
+    eval_stats['corr_eval/pearson_correlation'] = pearson_corr
+    eval_stats['corr_eval/pearson_pval'] = pearson_pval
+    eval_stats['cm_eval/TN'] = tn
+    eval_stats['cm_eval/FP'] = fp
+    eval_stats['cm_eval/FN'] = fn
+    eval_stats['cm_eval/TP'] = tp
+    eval_stats['acc_eval/Unsafe ACC'] = tp / (tp + fn)
+    eval_stats['acc_eval/Safe ACC'] = tn / (tn + fp)
+    eval_stats['acc_eval/accuracy'] = acc
+    logger.log(eval_stats)
     return eval_stats
 
 def main():
@@ -307,8 +413,7 @@ def main():
     train_data, val_data, train_data_cost, _ = load_data(args.task,args.data_path,args.seed)
     label = torch.zeros(len(train_data))
 
-    for idx, (_, _, _, cost) in enumerate(tqdm(train_data_cost)):
-    # for idx, (_, _, _, cost) in enumerate(tqdm(train_data)):
+    for idx, (_, _, _, cost, _) in enumerate(tqdm(train_data_cost)):
         label[idx] = cost[0]
     sum_unsafe = label.sum()
     weight_safe = 0.5/(len(train_data)-sum_unsafe)
@@ -325,8 +430,6 @@ def main():
     val_dataloader = torch.utils.data.DataLoader(
         val_data, batch_size=args.batch_size, shuffle=False
     )
-    _, _, _, cost = next(iter(train_dataloader))
-    print(cost.sum()/cost.shape[0])
 
 
     backbones = ["r3m","vc1","resnet","dino","dino_cls","scratch","full_scratch"]
@@ -361,7 +464,7 @@ def main():
             backbone = f"{backbone}_ft"
         training_type = "linear-probing"
         if not args.single_layer_classifier:
-            training_type = "MLP"
+            training_type = "mlp_with_gp"
         config = vars(args)
         config["backbone"] = backbone
         config["ckpt_dir"] = ckpt_dir
@@ -398,13 +501,12 @@ def main():
         else:
             args.freeze_wm = True
 
-        obs, _, _, _ = next(iter(val_dataloader))
+        obs, _, _, _, _ = next(iter(val_dataloader))
         for k, v in obs.items():
             obs[k] = v.to(args.device).squeeze(1)
         fc = FailureClassifier(obs, wm, args).to(args.device)
         train_stats, val_stats = train(fc, train_dataloader, val_dataloader, args, logger)
-        # eval_stats = test(fc, val_dataloader, args, logger)
-
+        eval_stats = test(fc, val_dataloader, args, logger)
 
         # ckpts and stats will be saved to the original ckpt_dir
         torch.save(
@@ -417,7 +519,7 @@ def main():
         torch.save({
             'train_stats': train_stats,
             'val_stats': val_stats,
-            # 'eval_stats': eval_stats
+            'eval_stats': eval_stats
         }, save_path / training_type / args.task  / backbone / flag / 'stats.pth')
 
         wandb.finish()

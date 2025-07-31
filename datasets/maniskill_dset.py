@@ -253,9 +253,9 @@ class ManiSkillDataset(TrajDataset):
                 "proprio" : proprio_states
             }
 
-            return obs, actions, full_states, {"cost":(self.costs[idx]>0).long()}
+            return obs, actions, full_states, {"cost":(self.costs[idx]>0).long(),"h":-self.costs[idx]+0.5}
         else:
-            return None, None, None, {"cost":(self.costs[idx]>0).long()}
+            return None, None, None, {"cost":(self.costs[idx]>0).long(),"h":-self.costs[idx]+0.5}
         
 
     def __getitem__(self, idx):

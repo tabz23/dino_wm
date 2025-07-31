@@ -95,14 +95,14 @@ def pil_loader(path):
 def load_dreamer():
     import sys
     import pathlib
-    sys.path.append("/storage1/sibai/Active/ihab/research_new/SafeDreamer/dreamerv3-torch")
+    sys.path.append("/storage1/fs1/sibai/Active/ihab/research_new/SafeDreamer/dreamerv3-torch")
     from dreamer_nom import Dreamer
     import tools
     import yaml
     parser = argparse.ArgumentParser()
     parser.add_argument("--configs", nargs="+")
     configs = yaml.safe_load(
-            (pathlib.Path("/storage1/sibai/Active/ihab/research_new/SafeDreamer/hj/configs.yaml")).read_text()
+            (pathlib.Path("/storage1/fs1/sibai/Active/ihab/research_new/SafeDreamer/hj/configs.yaml")).read_text()
         )
 
     def recursive_update(base, update):
@@ -127,6 +127,6 @@ def load_dreamer():
     agent = Dreamer(env.observation_space, env.action_space, config, None, None).to(config.device)
 
     # Load pre-trained weights
-    ckpt = torch.load("/storage1/sibai/Active/ihab/research_new/SafeDreamer/hj/reaching (1).pt")
+    ckpt = torch.load("/storage1/fs1/sibai/Active/ihab/research_new/SafeDreamer/hj/reaching (1).pt")
     agent.load_state_dict(ckpt["agent_state_dict"])
     return agent

@@ -148,9 +148,9 @@ class PointMazeDataset(TrajDataset):
             # print(f"frames: {frames}")
             # print(f"idx: {idx}")
             # print("---")
-            return obs, act, state, {"cost":(self.costs[idx]<=0).long()}  # env_info placeholder
+            return obs, act, state, {"cost":(self.costs[idx]<=0).long(),"h":self.costs[idx]}  # env_info placeholder
         else:
-            return None, None, None, {"cost":(self.costs[idx]<=0).long()}
+            return None, None, None, {"cost":(self.costs[idx]<=0).long(),"h":self.costs[idx]}
 
     def __getitem__(self, idx):
         return self.get_frames(idx, range(self.get_seq_length(idx)))

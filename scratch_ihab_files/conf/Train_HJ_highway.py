@@ -155,7 +155,7 @@ class HighwayWrapper(gym.Env):
     """Wrapper for Highway environment to work with the HJ training"""
     def __init__(self, device: str = None):
         super().__init__()
-        self.max_steps = 400  
+        self.max_steps = 500  
         self.env = Highway_10D_game_Env2cost()
         self.device = torch.device(device) if device else torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.observation_space = self.env.observation_space
@@ -1026,4 +1026,4 @@ if __name__ == "__main__":
     
     
     
-# python "/storage1/fs1/sibai/Active/ihab/research_new/dino_wm/Train_HJ_highway.py"  --nx 50 --ny 50 --step-per-epoch 3000 --total-episodes 200 --batch_size-pyhj 64 --gamma-pyhj 0.99 --actor-gradient-steps 2
+# python "/storage1/fs1/sibai/Active/ihab/research_new/dino_wm/Train_HJ_highway.py"  --nx 50 --ny 50 --step-per-epoch 3000 --total-episodes 200 --batch_size-pyhj 256 --gamma-pyhj 0.999 --actor-gradient-steps 2

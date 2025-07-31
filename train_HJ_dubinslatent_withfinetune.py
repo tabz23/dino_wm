@@ -74,6 +74,11 @@ def get_args_and_merge_config():
         "--encoder_lr", type=float, default=1e-5,
         help="Learning rate for the encoder fine-tuning"
     )
+    parser.add_argument('--critic-net', type=int, nargs=3, default=[512,512,512],
+                    help='Hidden sizes for critic (expects 3 integers)')
+    parser.add_argument('--control-net', type=int, nargs=3, default=[512,512,512],
+                    help='Hidden sizes for control policy (expects 3 integers)')
+    
     args, remaining = parser.parse_known_args()
 
     with open(args.config) as f:
@@ -670,7 +675,7 @@ def main():
         actor_gradient_steps=getattr(args, 'actor_gradient_steps', 1),
         action_space=train_envs[0].action_space
     )
-
+    print("args.with_proprio",args.with_proprio)
     # Use optimized replay buffer
     buffer = OptimizedReplayBuffer(args.buffer_size, device, dummy_obs, action_dim)
 
@@ -766,3 +771,9 @@ currently loss to encoder backpropped only through the critic not also through t
 
 # python "/storage1/fs1/sibai/Active/ihab/research_new/dino_wm/train_HJ_dubinslatent_withfinetune.py"  --config train_HJ_configs.yaml --dino_encoder dino  --with_finetune --encoder_lr 1e-6 --nx 50 --ny 50 --step-per-epoch 200 --total-episodes 200 --batch_size-pyhj 64 --gamma-pyhj 0.99 --actor-gradient-steps 2
 # python "/storage1/fs1/sibai/Active/ihab/research_new/dino_wm/train_HJ_dubinslatent_withfinetune.py"  --config train_HJ_configs.yaml --dino_encoder dino  --nx 50 --ny 50 --step-per-epoch 200 --total-episodes 200 --batch_size-pyhj 64 --gamma-pyhj 0.99 --actor-gradient-steps 2
+
+
+
+
+
+# python "/storage1/fs1/sibai/Active/ihab/research_new/dino_wm/train_HJ_dubinslatent_withfinetune.py" --dino_ckpt_dir "/storage1/fs1/sibai/Active/ihab/research_new/checkpt_dino/output3_frameskip1/dubins"  --config train_HJ_configs.yaml --dino_encoder dino_cls  --nx 50 --ny 50 --step-per-epoch 200 --total-episodes 200 --batch_size-pyhj 64 --gamma-pyhj 0.99 --actor-gradient-steps 2 --critic_net 512 512 512 --control_net 512 512 512

@@ -6,7 +6,7 @@ from dubins import DubinsEnv  # Make sure this import is correct!
 from pathlib import Path
 
 def collect_dubins_dataset(
-    outdir="/storage1/fs1/sibai/Active/ihab/research_new/datasets_dino/dubins1800",
+    outdir="/storage1/fs1/sibai/Active/ihab/research_new/datasets_dino/dubins1800_continuous_cost",
     n_traj=1800,
     min_traj_len=100,
     max_traj_len=101,
@@ -40,7 +40,8 @@ def collect_dubins_dataset(
             visuals.append(img)
             actions.append(action)
             states.append(info["state"])
-            costs.append(1.0 if info["h"] <= 0 else 0.0)  # ADDED: binary cost (1=unsafe, 0=safe)
+            # costs.append(1.0 if info["h"] <= 0 else 0.0)  # ADDED: binary cost (1=unsafe, 0=safe)
+            costs.append(info["h"])  # ADDED: binary cost (1=unsafe, 0=safe)
             t += 1
         # Save trajectory visuals (images)
         visuals = np.stack(visuals).astype(np.uint8)  # [T, H, W, C]
