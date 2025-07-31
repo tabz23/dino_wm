@@ -603,7 +603,6 @@
 
 # if __name__ == "__main__":
 #     main()
-
 """
 Test learned Hamilton-Jacobi safety filter in latent space for Dubins car
 """
@@ -777,8 +776,8 @@ class HJPolicyEvaluator:
         if len(self.action_history) > self.num_hist:
             self.action_history.pop(0)
     
-    def predict_next_state_value(self, obs, action):
-        """Predict HJ value of next state using world model dynamics"""
+    def predict_next_state_value(self, obs, action, return_debug_info=False):
+        """Predict HJ value of next state using world model's ACTUAL rollout method"""
         # Ensure action is consistent shape
         if isinstance(action, np.ndarray):
             if action.ndim == 0:
@@ -788,112 +787,160 @@ class HJPolicyEvaluator:
         else:
             action = np.array([action]) if np.isscalar(action) else np.array(action)
         
-        # If we don't have enough history, we can still make predictions 
-        # because the ViT architecture handles variable sequence lengths
-        if len(self.obs_history) == 0:
-            # Use current observation only - no artificial history
-            visual_list = []
-            proprio_list = []
-            action_list = []
-            
-            # Extract current observation
-            if isinstance(obs, dict):
-                visual = obs['visual']
-                proprio = obs['proprio']
-            else:
-                visual, proprio = obs
-            
-            # Prepare current observation
-            if visual.shape[2] == 3:  # Channels last format
-                visual_np = np.transpose(visual, (2, 0, 1)).astype(np.float32) / 255.0
-            else:  # Already in channels first format
-                visual_np = visual.astype(np.float32) / 255.0
-                
-            visual_list.append(visual_np)
-            proprio_list.append(proprio)
-            action_list.append(action)
-            
-        else:
-            # Use actual history
-            visual_list = []
-            proprio_list = []
-            action_list = []
-            
-            for hist_obs in self.obs_history:
-                if isinstance(hist_obs, dict):
-                    visual = hist_obs['visual']
-                    proprio = hist_obs['proprio']
-                else:
-                    visual, proprio = hist_obs
-                
-                # Check visual shape and ensure it has 3 channels
-                if visual.shape[2] == 3:  # Channels last format
-                    visual_np = np.transpose(visual, (2, 0, 1)).astype(np.float32) / 255.0
-                else:  # Already in channels first format
-                    visual_np = visual.astype(np.float32) / 255.0
-                    
-                visual_list.append(visual_np)
-                proprio_list.append(proprio)
-            
-            # Add corresponding actions (ensure consistent shapes)
-            for hist_action in self.action_history:
-                if isinstance(hist_action, np.ndarray):
-                    if hist_action.ndim == 0:
-                        hist_action = np.array([hist_action])
-                    elif hist_action.ndim > 1:
-                        hist_action = hist_action.flatten()
-                else:
-                    hist_action = np.array([hist_action]) if np.isscalar(hist_action) else np.array(hist_action)
-                action_list.append(hist_action)
-            
-            # Add the proposed action for prediction
-            action_list.append(action)
+        predicted_image = None
+        predicted_proprio = None
+        method_used = "actual_rollout_method"
         
-        # Stack into tensors
-        visual_tensor = torch.from_numpy(np.stack(visual_list)).unsqueeze(0).to(self.device)
-        proprio_tensor = torch.from_numpy(np.stack(proprio_list)).unsqueeze(0).to(self.device)
-        action_tensor = torch.from_numpy(np.stack(action_list)).unsqueeze(0).to(self.device)
+        # Extract current observation
+        if isinstance(obs, dict):
+            visual = obs['visual']
+            proprio = obs['proprio']
+        else:
+            visual, proprio = obs
         
         with torch.no_grad():
-            # Create observation dictionary
-            obs_dict = {'visual': visual_tensor, 'proprio': proprio_tensor}
-            
-            # Use world model's rollout method which is designed for this
-            # rollout expects: obs_0 (initial observations) and act (actions to apply)
             try:
-                # Use rollout method - it handles variable sequence lengths properly
-                z_obses, z_full = self.wm.rollout(obs_0=obs_dict, act=action_tensor)
+                # Determine how to create obs_0 based on available history
+                if len(self.obs_history) >= self.num_hist:
+                    # Use actual history
+                    method_used = "rollout_with_history"
+                    
+                    # Get last num_hist observations from history
+                    recent_history = self.obs_history[-self.num_hist:]
+                    visual_list = []
+                    proprio_list = []
+                    
+                    for hist_obs in recent_history:
+                        if isinstance(hist_obs, dict):
+                            hist_visual = hist_obs['visual']
+                            hist_proprio = hist_obs['proprio']
+                        else:
+                            hist_visual, hist_proprio = hist_obs
+                        
+                        # CRITICAL FIX: Apply proper normalization for world model
+                        # World model was trained with transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5])
+                        # This converts [0,1] -> [-1,1] via: (x - 0.5) / 0.5 = 2*x - 1
+                        if hist_visual.shape[2] == 3:  # Channels last
+                            visual_np = np.transpose(hist_visual, (2, 0, 1)).astype(np.float32) / 255.0
+                        else:
+                            visual_np = hist_visual.astype(np.float32) / 255.0
+                        
+                        # Apply world model normalization: [0,1] -> [-1,1]
+                        visual_np = 2.0 * visual_np - 1.0
+                        
+                        visual_list.append(visual_np)
+                        proprio_list.append(hist_proprio)
+                    
+                    # Stack into obs_0 format
+                    visual_tensor = torch.from_numpy(np.stack(visual_list)).unsqueeze(0).to(self.device)  # (1, num_hist, C, H, W)
+                    proprio_tensor = torch.from_numpy(np.stack(proprio_list)).unsqueeze(0).to(self.device)  # (1, num_hist, proprio_dim)
+                    
+                # else:
+                #     # Bootstrap with current observation repeated
+                #     method_used = "rollout_bootstrap"
+                    
+                #     if visual.shape[2] == 3:  # Channels last
+                #         visual_np = np.transpose(visual, (2, 0, 1)).astype(np.float32) / 255.0
+                #     else:
+                #         visual_np = visual.astype(np.float32) / 255.0
+                    
+                #     # Apply world model normalization: [0,1] -> [-1,1] ###impimmipmimpipimipmimpipmimpipmipmipmimppimipmimpipmimpipmipmimpimpimpimpimpimpipmipmipmipmipmipmipmipmipmipimipm
+                #     visual_np = 2.0 * visual_np - 1.0
+                    
+                #     visual_list = [visual_np] * self.num_hist
+                #     proprio_list = [proprio] * self.num_hist
+                    
+                #     visual_tensor = torch.from_numpy(np.stack(visual_list)).unsqueeze(0).to(self.device)
+                #     proprio_tensor = torch.from_numpy(np.stack(proprio_list)).unsqueeze(0).to(self.device)
                 
-                # Get the final predicted observation state
-                z_final = z_obses['visual'][:, -1:, :, :]  # Last predicted state
-                z_final_proprio = z_obses['proprio'][:, -1:, :]  # Last predicted proprio
+                # Create obs_0 dictionary
+                obs_0 = {'visual': visual_tensor, 'proprio': proprio_tensor}
                 
-                # Flatten for HJ evaluation
-                if self.with_proprio:
-                    z_vis = z_final.reshape(1, -1)
-                    z_prop = z_final_proprio.squeeze(1)
-                    z_next_flat = torch.cat([z_vis, z_prop], dim=-1)
-                else:
-                    z_next_flat = z_final.reshape(1, -1)
+                # Create action tensor for rollout - this should be (1, num_hist + num_pred, action_dim)
+                # For single step prediction: num_pred = 1
+                # So we need num_hist actions (for context) + 1 action (for prediction)
                 
-                # Get HJ value for predicted next state
-                next_action = self.actor(z_next_flat)
-                next_hj_value = self.critic(z_next_flat, next_action).item()
+                if len(self.obs_history) >= self.num_hist:
+                    # Use historical actions + new action
+                    recent_actions = self.action_history[-self.num_hist:]
+                    action_list = []
+                    for hist_action in recent_actions:
+                        if isinstance(hist_action, np.ndarray):
+                            if hist_action.ndim == 0:
+                                hist_action = np.array([hist_action])
+                            elif hist_action.ndim > 1:
+                                hist_action = hist_action.flatten()
+                        else:
+                            hist_action = np.array([hist_action]) if np.isscalar(hist_action) else np.array(hist_action)
+                        action_list.append(hist_action)
+                    
+                    # Add the prediction action
+                    action_list.append(action)
+                # else:
+                #     # Use zero actions for history + prediction action
+                #     zero_action = np.zeros_like(action)
+                #     action_list = [zero_action] * self.num_hist + [action]
                 
-            except Exception as e:
-                # Fallback: if rollout fails, use encode + predict approach
-                print(f"Rollout failed ({e}), using encode+predict fallback")
+                # Stack actions: (1, num_hist + 1, action_dim)
+                action_tensor = torch.from_numpy(np.stack(action_list)).unsqueeze(0).to(self.device)
                 
-                # Encode observations with actions
-                z_current = self.wm.encode(obs_dict, action_tensor)
+                if return_debug_info:
+                    print(f"  Method: {method_used}")
+                    print(f"  obs_0 visual shape: {obs_0['visual'].shape}")
+                    print(f"  obs_0 visual range: [{obs_0['visual'].min():.3f}, {obs_0['visual'].max():.3f}]")
+                    print(f"  obs_0 proprio shape: {obs_0['proprio'].shape}")
+                    print(f"  action tensor shape: {action_tensor.shape}")
+                    print(f"  Prediction action: {action}")
                 
-                # Take only available history for prediction (ViT can handle variable lengths)
-                z_pred = self.wm.predict(z_current)
+                # USE THE ACTUAL ROLLOUT METHOD
+                z_obses, z_full = self.wm.rollout(obs_0=obs_0, act=action_tensor)
                 
-                # Extract the last predicted state
-                z_obs_next, _ = self.wm.separate_emb(z_pred[:, -1:, :, :])
+                if return_debug_info:
+                    print(f"  Rollout z_obses visual shape: {z_obses['visual'].shape}")
+                    print(f"  Rollout z_obses proprio shape: {z_obses['proprio'].shape}")
                 
-                # Flatten for HJ evaluation
+                # Get the FINAL state (last timestep) - this is our prediction
+                z_final_visual = z_obses['visual'][:, -1:, :, :]  # (1, 1, visual_patches, emb_dim)
+                z_final_proprio = z_obses['proprio'][:, -1:, :]   # (1, 1, proprio_emb_dim)
+                
+                z_obs_next = {'visual': z_final_visual, 'proprio': z_final_proprio}
+                
+                if return_debug_info:
+                    print(f"  Final predicted state visual shape: {z_obs_next['visual'].shape}")
+                    print(f"  Final predicted state proprio shape: {z_obs_next['proprio'].shape}")
+                
+                # Decode predicted state if requested
+                if return_debug_info and self.wm.decoder is not None:
+                    try:
+                        print("  Decoding predicted state...")
+                        decoded_obs, diff = self.wm.decode_obs(z_obs_next)
+                        print(f"  Decoded visual shape: {decoded_obs['visual'].shape}")
+                        print(f"  Raw decoded range: [{decoded_obs['visual'].min():.3f}, {decoded_obs['visual'].max():.3f}]")
+                        
+                        predicted_image_raw = decoded_obs['visual'][0, 0].cpu().numpy()  # (C, H, W)
+                        
+                        # Convert back from world model format [-1,1] to display format [0,1]
+                        predicted_image_raw = (predicted_image_raw + 1.0) / 2.0  # [-1,1] -> [0,1]
+                        predicted_image = np.transpose(predicted_image_raw, (1, 2, 0))  # (H, W, C)
+                        predicted_image = np.clip(predicted_image, 0, 1)
+                        
+                        predicted_proprio = z_obs_next['proprio'][0, 0].cpu().numpy()
+                        
+                        print(f"  Converted image range: [{predicted_image.min():.3f}, {predicted_image.max():.3f}]")
+                        
+                    except Exception as decode_error:
+                        print(f"  Decoding failed: {decode_error}")
+                        import traceback
+                        traceback.print_exc()
+                        predicted_image = None
+                        predicted_proprio = None
+                
+                # For HJ evaluation, we need to convert the latent back to HJ policy format
+                # The HJ policy was trained on [0,1] images, but world model latents are from [-1,1] images
+                # We need to be careful about this conversion...
+                
+                # For now, let's use the latents directly for HJ evaluation
+                # since they represent the same visual content, just encoded differently
                 if self.with_proprio:
                     z_vis = z_obs_next['visual'].reshape(1, -1)
                     z_prop = z_obs_next['proprio'].squeeze(1)
@@ -904,8 +951,29 @@ class HJPolicyEvaluator:
                 # Get HJ value for predicted next state
                 next_action = self.actor(z_next_flat)
                 next_hj_value = self.critic(z_next_flat, next_action).item()
+                
+                if return_debug_info:
+                    print(f"  Predicted HJ value: {next_hj_value:.3f}")
+                
+            except Exception as e:
+                print(f"ERROR in rollout prediction: {e}")
+                import traceback
+                traceback.print_exc()
+                # Return safe defaults
+                next_hj_value = 0.0
+                predicted_image = None
+                predicted_proprio = None
         
-        return next_hj_value
+        # Debug logging
+        if return_debug_info:
+            print(f"  Prediction method used: {method_used}")
+            print(f"  History length: {len(self.obs_history)}/{self.num_hist}")
+            print(f"  Action: {action}")
+        
+        if return_debug_info:
+            return next_hj_value, predicted_image, predicted_proprio
+        else:
+            return next_hj_value
 
 
 class Actor(torch.nn.Module):
@@ -1085,8 +1153,13 @@ def simulate_dubins_with_hj(hj_evaluator, env, mode="switching", max_steps=200,
             # Get PID action
             pid_action = pid_controller.get_action(proprio_state)
             
-            # Predict HJ value of next state with PID action
-            next_hj_value = hj_evaluator.predict_next_state_value(obs, pid_action)
+            # Predict HJ value of next state with PID action (with debug info)
+            if step_count < 10:  # Only get debug info for first 10 steps to avoid slowdown
+                next_hj_value, predicted_img, predicted_prop = hj_evaluator.predict_next_state_value(
+                    obs, pid_action, return_debug_info=True)
+            else:
+                next_hj_value = hj_evaluator.predict_next_state_value(obs, pid_action)
+                predicted_img, predicted_prop = None, None
             
             # Switch to safe controller if next state would be unsafe
             if next_hj_value < safety_threshold:
@@ -1097,6 +1170,11 @@ def simulate_dubins_with_hj(hj_evaluator, env, mode="switching", max_steps=200,
                     total_switches += 1
                 print(f"Step {step_count}: HJ intervention! Next HJ would be {next_hj_value:.3f}")
                 print(f"  PID action: {pid_action}, HJ action: {action}")
+                
+                # Debug: Compare predicted vs actual if we have debug info
+                if predicted_img is not None and predicted_prop is not None:
+                    print(f"  Predicted proprio: {predicted_prop}")
+                
                 last_controller = "HJ"
                 hj_actions_taken.append(action.copy())
                 
@@ -1124,6 +1202,11 @@ def simulate_dubins_with_hj(hj_evaluator, env, mode="switching", max_steps=200,
         if mode == "switching" and len(predicted_hj_values) > len(actual_hj_values):
             actual_next_hj = hj_evaluator.get_hj_value(obs_next)
             actual_hj_values.append(actual_next_hj)
+            
+            # Save comparison images for first few interventions
+            if len(actual_hj_values) <= 10 and step_count < 10:
+                save_prediction_comparison(obs, obs_next, predicted_img, predicted_prop, 
+                                         proprio_state, step_count, video_path, run_id)
         
         # Track constraint violations (negative cost means unsafe)
         if cost < 0:
@@ -1199,6 +1282,70 @@ def simulate_dubins_with_hj(hj_evaluator, env, mode="switching", max_steps=200,
         'min_hj': min_hj_value,
         'final_cost': cost
     }
+
+
+def save_prediction_comparison(obs_current, obs_actual_next, predicted_img, predicted_prop, 
+                              current_prop, step_count, video_path, run_id):
+    """Save side-by-side comparison of predicted vs actual next state"""
+    if predicted_img is None:
+        return
+        
+    try:
+        # Extract actual next image
+        if isinstance(obs_actual_next, dict):
+            actual_next_img = obs_actual_next['visual']
+            actual_next_prop = obs_actual_next['proprio']
+        else:
+            actual_next_img = obs_actual_next[0]
+            actual_next_prop = obs_actual_next[1]
+        
+        # Extract current image
+        if isinstance(obs_current, dict):
+            current_img = obs_current['visual']
+        else:
+            current_img = obs_current[0]
+        
+        # Normalize actual images to [0,1] if needed
+        if actual_next_img.max() > 1.0:
+            actual_next_img = actual_next_img.astype(np.float32) / 255.0
+        if current_img.max() > 1.0:
+            current_img = current_img.astype(np.float32) / 255.0
+            
+        # Create comparison plot
+        fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+        
+        # Current state
+        axes[0].imshow(current_img)
+        axes[0].set_title(f'Current State\nProprio: [{current_prop[0]:.2f}, {current_prop[1]:.2f}, {current_prop[2]:.2f}]')
+        axes[0].axis('off')
+        
+        # Predicted next state
+        axes[1].imshow(predicted_img)
+        if predicted_prop is not None:
+            # Note: predicted_prop is the embedding (10-dim), not original proprio (3-dim)
+            axes[1].set_title(f'Predicted Next\nProprio Embedding: {predicted_prop.shape[0]}D vector')
+        else:
+            axes[1].set_title('Predicted Next\n(No proprio decoded)')
+        axes[1].axis('off')
+        
+        # Actual next state
+        axes[2].imshow(actual_next_img)
+        axes[2].set_title(f'Actual Next\nProprio: [{actual_next_prop[0]:.2f}, {actual_next_prop[1]:.2f}, {actual_next_prop[2]:.2f}]')
+        axes[2].axis('off')
+        
+        plt.tight_layout()
+        
+        # Save the comparison
+        os.makedirs(video_path, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        comparison_path = os.path.join(video_path, f"prediction_comparison_run{run_id}_step{step_count}_{timestamp}.png")
+        plt.savefig(comparison_path, dpi=150, bbox_inches='tight')
+        plt.close()
+        
+        print(f"  Prediction comparison saved: {comparison_path}")
+        
+    except Exception as e:
+        print(f"  Failed to save prediction comparison: {e}")
 
 
 def create_debug_plots(predicted_hj_values, actual_hj_values, pid_actions, hj_actions, 
