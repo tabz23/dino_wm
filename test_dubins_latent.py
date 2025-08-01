@@ -576,7 +576,7 @@ def simulate_dubins_with_hj(hj_evaluator, env, mode="switching", max_steps=200,
             actual_hj_values.append(actual_next_hj)
             
             # Save comparison images for first few interventions
-            if len(actual_hj_values) <= 30 and step_count < 10:
+            if len(actual_hj_values) <= 40 and step_count < 30:
                 save_prediction_comparison(obs, obs_next, predicted_img, predicted_prop, 
                                          proprio_state, step_count, video_path, run_id)
         
