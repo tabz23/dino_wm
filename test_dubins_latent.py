@@ -46,7 +46,7 @@ class DubinsEnvForTesting:
         terminated = done
         truncated = False
         obs = obs_out[0] if isinstance(obs_out, tuple) else obs_out
-        h_s = info.get('h', 0.0) * 3  # Multiply by 3 to match training
+        h_s = info.get('h', 0.0) * 10  # Multiply by 10 to match training
         return obs, h_s, terminated, truncated, info
     
     def render(self, mode='rgb_array'):
@@ -109,8 +109,13 @@ class HJPolicyEvaluator:
         else:
             visual, proprio = obs
         
-        # Prepare visual data
+        # Prepare visual data with CORRECT normalization
         visual_np = np.transpose(visual, (2, 0, 1)).astype(np.float32) / 255.0
+        
+        # CRITICAL FIX: Apply world model normalization [0,1] -> [-1,1]
+        # World model was trained with transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5])
+        visual_np = 2.0 * visual_np - 1.0
+        
         visual_tensor = torch.from_numpy(visual_np).unsqueeze(0).unsqueeze(0).to(self.device)
         
         # Prepare proprio data
@@ -133,7 +138,7 @@ class HJPolicyEvaluator:
             z = lat['visual'].reshape(lat['visual'].shape[0], -1)
         
         return z
-    
+        
     def get_hj_value(self, obs):
         """Get HJ value for current observation"""
         self.current_obs = obs
@@ -793,7 +798,7 @@ def main():
     
     # Paths
     wm_ckpt_dir = "/storage1/fs1/sibai/Active/ihab/research_new/checkpt_dino/output3_frameskip1/dubins/dino_cls"
-    hj_ckpt_dir = "/storage1/fs1/sibai/Active/ihab/research_new/dino_wm/runs/ddpg_hj_latent/dino_cls-0731_1645/epoch_10"
+    hj_ckpt_dir = "/storage1/fs1/sibai/Active/ihab/research_new/dino_wm/runs/ddpg_hj_latent/dino_cls-0805_1925/epoch_100"
     video_save_path = "/storage1/fs1/sibai/Active/ihab/research_new/dino_wm/dubins_test"
     
     actor_path = os.path.join(hj_ckpt_dir, "actor.pth")
@@ -805,11 +810,11 @@ def main():
     
     # Create HJ evaluator
     print("Loading HJ policy...")
-    hj_evaluator = HJPolicyEvaluator(actor_path, critic_path, wm, device, with_proprio=False)
+    hj_evaluator = HJPolicyEvaluator(actor_path, critic_path, wm, device, with_proprio=True)
     
     # Run simulations for each mode
     modes = ["switching", "pid_only", "safe_only"]
-    num_runs_per_mode = 5
+    num_runs_per_mode = 10
     
     all_results = {}
     
