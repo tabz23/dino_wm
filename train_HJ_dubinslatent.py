@@ -343,6 +343,7 @@ def main():
     args.batch_size_pyhj   = int(args.batch_size_pyhj)
     args.buffer_size       = int(args.buffer_size)
     args.dino_ckpt_dir = os.path.join(args.dino_ckpt_dir, args.dino_encoder)
+    args.with_finetune = "train_HJ_dubinslatent"
     
     # random.seed(args.seed)
     np.random.seed(args.seed)
@@ -417,6 +418,16 @@ def main():
     policy.last_actor_loss  = 0.0
     policy.last_critic_loss = 0.0
     def learn_and_record(batch, **kw):
+        with torch.no_grad():
+            batch_actions = policy(batch, model="actor").act
+            # Store action statistics for logging
+            policy.last_action_stats = {
+                'mean': batch_actions.mean(dim=0).cpu().numpy(),
+                'std': batch_actions.std(dim=0).cpu().numpy(),
+                'min': batch_actions.min(dim=0)[0].cpu().numpy(),
+                'max': batch_actions.max(dim=0)[0].cpu().numpy(),
+                'sample_actions': batch_actions[:5].cpu().numpy()  # Log first 5 actions as samples
+            }
         metrics = orig_learn(batch, **kw)
         policy.last_actor_loss  = metrics["loss/actor"]
         policy.last_critic_loss = metrics["loss/critic"]
@@ -425,10 +436,32 @@ def main():
 
     # 8) define train_fn to log those to W&B
     def train_fn(epoch: int, step_idx: int):
-        wandb.log({
-            "loss/actor":  policy.last_actor_loss,
-            "loss/critic": policy.last_critic_loss,
-        })
+        log_dict = {
+        "loss/actor":  policy.last_actor_loss,
+        "loss/critic": policy.last_critic_loss,
+        }
+           # Log action statistics if available
+        if hasattr(policy, 'last_action_stats'):
+            stats = policy.last_action_stats
+            
+            # Log per-dimension statistics for multi-dimensional actions
+            if len(stats['mean']) > 1:
+                for i in range(len(stats['mean'])):
+                    log_dict[f"actions/dim_{i}_mean"] = stats['mean'][i]
+                    log_dict[f"actions/dim_{i}_std"] = stats['std'][i]
+                    log_dict[f"actions/dim_{i}_min"] = stats['min'][i]
+                    log_dict[f"actions/dim_{i}_max"] = stats['max'][i]
+            else:
+                # Single dimension action
+                log_dict["actions/mean"] = stats['mean'][0]
+                log_dict["actions/std"] = stats['std'][0]
+                log_dict["actions/min"] = stats['min'][0]
+                log_dict["actions/max"] = stats['max'][0]
+            
+            # Overall statistics
+            log_dict["actions/overall_mean"] = np.mean(stats['mean'])
+            log_dict["actions/overall_std"] = np.mean(stats['std'])
+        wandb.log(log_dict)
 
     # 9) collectors
     buffer          = VectorReplayBuffer(args.buffer_size, args.training_num)

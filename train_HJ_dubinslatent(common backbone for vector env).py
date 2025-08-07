@@ -401,7 +401,22 @@ def main():
     def learn_and_record(batch, **kw):
         if args.with_finetune and encoder_optim is not None:
             encoder_optim.zero_grad()
-
+            # Capture predicted actions before learning
+        with torch.no_grad():
+            batch_actions = policy(batch, model="actor").act
+            # Log action statistics
+            action_mean = batch_actions.mean(dim=0).cpu().numpy()
+            action_std = batch_actions.std(dim=0).cpu().numpy()
+            action_min = batch_actions.min(dim=0)[0].cpu().numpy()
+            action_max = batch_actions.max(dim=0)[0].cpu().numpy()
+            
+            # Store for logging
+            policy.last_action_stats = {
+                'mean': action_mean,
+                'std': action_std,
+                'min': action_min,
+                'max': action_max
+            }
         metrics = orig_learn(batch, **kw)  # actor + critic do backward internally
 
         if args.with_finetune and encoder_optim is not None:
@@ -418,6 +433,19 @@ def main():
             "loss/actor":  policy.last_actor_loss,
             "loss/critic": policy.last_critic_loss,
         })
+        if hasattr(policy, 'last_action_stats'):
+            stats = policy.last_action_stats
+            for i in range(len(stats['mean'])):
+                wandb_dict[f"actions/dim_{i}_mean"] = stats['mean'][i]
+                wandb_dict[f"actions/dim_{i}_std"] = stats['std'][i]
+                wandb_dict[f"actions/dim_{i}_min"] = stats['min'][i]
+                wandb_dict[f"actions/dim_{i}_max"] = stats['max'][i]
+            
+            # Overall action statistics
+            wandb_dict["actions/overall_mean"] = np.mean(stats['mean'])
+            wandb_dict["actions/overall_std"] = np.mean(stats['std'])
+        
+            wandb.log(wandb_dict)
 
     # 10) collectors
     buffer          = VectorReplayBuffer(args.buffer_size, args.training_num)
