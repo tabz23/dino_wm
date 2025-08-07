@@ -127,7 +127,7 @@ class RawDubinsEnv(gym.Env):
         terminated = done
         truncated = False
         obs = obs_out[0] if isinstance(obs_out, tuple) else obs_out
-        h_s = info.get('h', 0.0) * 3  # Multiply by 3 to make HJ easier to learn
+        h_s = info.get('h', 0.0) * 10 # Multiply by 10 to make HJ easier to learn
         return obs, h_s, terminated, truncated, info
 
 class OptimizedReplayBuffer:
@@ -211,6 +211,7 @@ def encode_batch_optimized(obs_batch, wm, device, with_proprio, requires_grad=Fa
     """Optimized batch encoding - expects pre-processed tensors"""
     if isinstance(obs_batch, tuple):
         visual_batch, proprio_batch = obs_batch
+        visual_batch = 2.0 * visual_batch - 1.0
     else:
         # Legacy path for list of observations
         visual_list = []
@@ -221,7 +222,18 @@ def encode_batch_optimized(obs_batch, wm, device, with_proprio, requires_grad=Fa
                 proprio = obs['proprio']
             else:
                 visual, proprio = obs
-            visual_np = np.transpose(visual, (2, 0, 1)).astype(np.float32) / 255.0
+            
+            # Check if visual data is already normalized [0,1] or raw [0,255]
+            if visual.max() > 1.0:
+                # Raw data [0,255] -> normalize to [0,1] first
+                visual_np = np.transpose(visual, (2, 0, 1)).astype(np.float32) / 255.0
+            else:
+                # Already normalized [0,1] -> just transpose
+                visual_np = np.transpose(visual, (2, 0, 1)).astype(np.float32)
+            
+            # APPLY WORLD MODEL NORMALIZATION: [0,1] -> [-1,1]
+            visual_np = 2.0 * visual_np - 1.0
+            
             visual_list.append(torch.from_numpy(visual_np))
             proprio_list.append(torch.from_numpy(proprio))
         visual_batch = torch.stack(visual_list).to(device)
@@ -470,6 +482,11 @@ class AvoidDDPGPolicy:
         # Actor update - exact as original: "update actor 5 times for each critic update"
         z_detached = z.detach()  # Detach to avoid gradients flowing to critic
         
+        # LOG ACTOR ACTIONS BEFORE BACKPROP
+        with torch.no_grad():
+            current_actions = self.actor(z_detached)
+            raw_network_output = self.actor.net(z_detached)  # Before max_action scaling
+            
         if not self.warmup:
             # Store individual losses for logging (not averaging)
             actor_losses = []
@@ -491,7 +508,16 @@ class AvoidDDPGPolicy:
         return {
             "loss/actor": final_actor_loss,
             "loss/critic": critic_loss.item(),
-            "grad_norm": grad_norm if with_finetune else 0.0
+            "grad_norm": grad_norm if with_finetune else 0.0,
+            # ACTION LOGGING
+            "actions/mean": current_actions.mean().item(),
+            "actions/std": current_actions.std().item(),
+            "actions/min": current_actions.min().item(),
+            "actions/max": current_actions.max().item(),
+            "actions/raw_mean": raw_network_output.mean().item(),
+            "actions/raw_std": raw_network_output.std().item(),
+            "actions/raw_min": raw_network_output.min().item(),
+            "actions/raw_max": raw_network_output.max().item(),
         }
 
     def exploration_noise(self, act, batch_obs):
@@ -528,6 +554,9 @@ class AvoidDDPGPolicy:
             # Where random actions would be unsafe (values < 0.0): stick with the policy action (act)
             # Where random actions would be safe (values >= 0.0): use the random action (rand_act)
             act = np.where(values < 0.0, act, rand_act)
+            
+            # noise = np.random.normal(0, self._noise, act.shape)
+            # act = act + noise
             
         # Warmup override - exact as original
         if self.warmup:
@@ -777,3 +806,7 @@ currently loss to encoder backpropped only through the critic not also through t
 
 
 # python "/storage1/fs1/sibai/Active/ihab/research_new/dino_wm/train_HJ_dubinslatent_withfinetune.py" --dino_ckpt_dir "/storage1/fs1/sibai/Active/ihab/research_new/checkpt_dino/output3_frameskip1/dubins"  --config train_HJ_configs.yaml --dino_encoder dino_cls  --nx 50 --ny 50 --step-per-epoch 200 --total-episodes 200 --batch_size-pyhj 64 --gamma-pyhj 0.99 --actor-gradient-steps 2 --critic_net 512 512 512 --control_net 512 512 512
+
+
+
+# python "/storage1/fs1/sibai/Active/ihab/research_new/dino_wm/train_HJ_dubinslatent_withfinetune.py" --dino_ckpt_dir "/storage1/fs1/sibai/Active/ihab/research_new/checkpt_dino/output3_frameskip1/dubins"  --config train_HJ_configs.yaml --dino_encoder dino_cls --nx 50 --ny 50 --step-per-epoch 200 --total-episodes 100 --batch_size-pyhj 64 --gamma-pyhj 0.99 --actor-gradient-steps 2 --critic-net 128 128 128  --control-net 128 128 128  --with_finetune --encoder_lr 1e-6
