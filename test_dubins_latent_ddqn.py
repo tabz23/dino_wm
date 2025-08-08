@@ -1,5 +1,5 @@
 """
-Test learned Hamilton-Jacobi safety filter in latent space for Dubins car
+Test learned Hamilton-Jacobi safety filter in latent space for Dubins car using DDQN
 """
 import sys
 import os
@@ -56,12 +56,39 @@ class DubinsEnvForTesting:
         pass
 
 
+# ADDED: Helper functions for discrete actions (same as in training code)
+def action_index_to_continuous(action_indices, num_actions, action_low=-1.0, action_high=1.0):
+    """Convert discrete action indices to continuous action values"""
+    if isinstance(action_indices, torch.Tensor):
+        action_indices = action_indices.cpu().numpy()
+    
+    # Map indices [0, num_actions-1] to continuous values [action_low, action_high]
+    continuous_actions = action_low + (action_indices / (num_actions - 1)) * (action_high - action_low)
+    return continuous_actions
+
+def continuous_to_action_index(continuous_actions, num_actions, action_low=-1.0, action_high=1.0):
+    """Convert continuous action values to discrete action indices"""
+    # Clamp actions to valid range
+    continuous_actions = np.clip(continuous_actions, action_low, action_high)
+    
+    # Map continuous values [action_low, action_high] to indices [0, num_actions-1]
+    normalized = (continuous_actions - action_low) / (action_high - action_low)
+    indices = (normalized * (num_actions - 1)).round().astype(int)
+    return indices
+
+
 class HJPolicyEvaluator:
-    """Evaluates HJ value and provides safe actions using learned latent-space policy"""
-    def __init__(self, actor_path, critic_path, wm, device='cuda', with_proprio=False):
+    """Evaluates HJ value and provides safe actions using learned DDQN latent-space policy"""
+    def __init__(self, critic_path, wm, device='cuda', with_proprio=False, num_actions=20):
         self.device = torch.device(device if torch.cuda.is_available() else 'cpu')
         self.wm = wm
         self.with_proprio = with_proprio
+        self.num_actions = num_actions
+        
+        # ADDED: Discrete action parameters
+        self.action_low = -1.0
+        self.action_high = 1.0
+        self.action_grid = np.linspace(self.action_low, self.action_high, self.num_actions)
         
         # Get num_hist from world model
         self.num_hist = self.wm.num_hist
@@ -73,31 +100,21 @@ class HJPolicyEvaluator:
         # Get state dimension by encoding a dummy observation
         z = self.encode_observation(dummy_obs)
         state_dim = z.shape[1]
-        action_dim = dummy_env.action_space.shape[0]
-        max_action = torch.tensor(dummy_env.action_space.high, device=self.device, dtype=torch.float32)
         
-        # Load actor and critic
-        self.actor = self._load_actor(actor_path, state_dim, action_dim, max_action)
-        self.critic = self._load_critic(critic_path, state_dim, action_dim)
-        
-        self.actor.eval()
+        # MODIFIED: Load only critic for DDQN
+        self.critic = self._load_critic(critic_path, state_dim, num_actions)
         self.critic.eval()
         
         # History buffers for world model prediction
         self.obs_history = []
         self.action_history = []
     
-    def _load_actor(self, path, state_dim, action_dim, max_action):
-        """Load actor network"""
-        # Recreate actor architecture from training code
-        actor = Actor(state_dim, action_dim, [512, 512,512], 'ReLU', max_action).to(self.device)
-        actor.load_state_dict(torch.load(path, map_location=self.device))
-        return actor
+    # REMOVED: Actor loading method (no longer needed)
     
-    def _load_critic(self, path, state_dim, action_dim):
-        """Load critic network"""
-        # Recreate critic architecture from training code
-        critic = Critic(state_dim, action_dim, [512, 512,512], 'ReLU').to(self.device)
+    def _load_critic(self, path, state_dim, num_actions):
+        """Load DDQN critic network"""
+        # MODIFIED: Recreate DDQN critic architecture from training code
+        critic = Critic(state_dim, num_actions, [512, 512, 512], 'ReLU').to(self.device)
         critic.load_state_dict(torch.load(path, map_location=self.device))
         return critic
     
@@ -140,21 +157,48 @@ class HJPolicyEvaluator:
         return z
         
     def get_hj_value(self, obs):
-        """Get HJ value for current observation"""
+        """MODIFIED: Get best HJ value for current observation using DDQN"""
         self.current_obs = obs
         z = self.encode_observation(obs)
         with torch.no_grad():
-            action = self.actor(z)
-            hj_value = self.critic(z, action).item()
+            q_values = self.critic(z)  # Shape: (1, num_actions)
+            best_hj_value = q_values.max().item()  # Take max over all actions
+        return best_hj_value
+    
+    # ADDED: New method to get HJ value for specific action
+    def get_hj_value_for_action(self, obs, action_index):
+        """Get HJ value for specific discrete action index"""
+        self.current_obs = obs
+        z = self.encode_observation(obs)
+        with torch.no_grad():
+            q_values = self.critic(z)  # Shape: (1, num_actions)
+            hj_value = q_values[0, action_index].item()  # Get Q-value for specific action
         return hj_value
     
     def get_safe_action(self, obs):
-        """Get safe action from HJ policy"""
+        """MODIFIED: Get safe action from DDQN policy"""
         self.current_obs = obs
         z = self.encode_observation(obs)
         with torch.no_grad():
-            action = self.actor(z).cpu().numpy().squeeze()
-        return action
+            q_values = self.critic(z)  # Shape: (1, num_actions)
+            best_action_index = q_values.argmax().item()  # Get index of best action
+        
+        # Convert to continuous action and ensure it's a numpy array
+        continuous_action = action_index_to_continuous(
+            best_action_index, self.num_actions, self.action_low, self.action_high
+        )
+        # FIXED: Ensure action is numpy array for consistency
+        return np.array([continuous_action], dtype=np.float32)
+    
+    # ADDED: Get safe action index
+    def get_safe_action_index(self, obs):
+        """Get safe action index from DDQN policy"""
+        self.current_obs = obs
+        z = self.encode_observation(obs)
+        with torch.no_grad():
+            q_values = self.critic(z)  # Shape: (1, num_actions)
+            best_action_index = q_values.argmax().item()  # Get index of best action
+        return best_action_index
     
     def update_history(self, obs, action):
         """Update history buffers"""
@@ -319,9 +363,9 @@ class HJPolicyEvaluator:
                 else:
                     z_next_flat = z_obs_next['visual'].reshape(1, -1)
                 
-                # Get HJ value for predicted next state
-                next_action = self.actor(z_next_flat)
-                next_hj_value = self.critic(z_next_flat, next_action).item()
+                # MODIFIED: Get HJ value for predicted next state using DDQN
+                q_values = self.critic(z_next_flat)  # Shape: (1, num_actions)
+                next_hj_value = q_values.max().item()  # Take best Q-value
                 
                 if return_debug_info:
                     print(f"  Predicted HJ value: {next_hj_value:.3f}")
@@ -349,12 +393,15 @@ class HJPolicyEvaluator:
             return next_hj_value
 
 
-class Actor(torch.nn.Module):
-    """Actor network - must match training architecture"""
-    def __init__(self, state_dim, action_dim, hidden_sizes, activation, max_action):
+# REMOVED: Actor class (no longer needed for DDQN)
+
+# MODIFIED: Critic class now outputs Q-values for all discrete actions
+class Critic(torch.nn.Module):
+    """Critic network - must match training architecture for DDQN"""
+    def __init__(self, state_dim, num_actions, hidden_sizes, activation):
         super().__init__()
-        self.net = self.build_net(state_dim, action_dim, hidden_sizes, activation)
-        self.register_buffer('max_action', max_action)
+        # MODIFIED: Output num_actions Q-values instead of single value
+        self.net = self.build_net(state_dim, num_actions, hidden_sizes, activation)
         
     def build_net(self, input_dim, output_dim, hidden_sizes, activation):
         layers = []
@@ -364,42 +411,27 @@ class Actor(torch.nn.Module):
             layers.append(getattr(torch.nn, activation)())
             prev_dim = hidden_dim
         layers.append(torch.nn.Linear(prev_dim, output_dim))
-        layers.append(torch.nn.Tanh())
         return torch.nn.Sequential(*layers)
     
     def forward(self, state):
-        return self.max_action * self.net(state)
-
-
-class Critic(torch.nn.Module):
-    """Critic network - must match training architecture"""
-    def __init__(self, state_dim, action_dim, hidden_sizes, activation):
-        super().__init__()
-        self.net = self.build_net(state_dim + action_dim, 1, hidden_sizes, activation)
-        
-    def build_net(self, input_dim, output_dim, hidden_sizes, activation):
-        layers = []
-        prev_dim = input_dim
-        for hidden_dim in hidden_sizes:
-            layers.append(torch.nn.Linear(prev_dim, hidden_dim))
-            layers.append(getattr(torch.nn, activation)())
-            prev_dim = hidden_dim
-        layers.append(torch.nn.Linear(prev_dim, output_dim))
-        return torch.nn.Sequential(*layers)
-    
-    def forward(self, state, action):
-        return self.net(torch.cat([state, action], dim=-1))
+        # MODIFIED: Return Q-values for all actions
+        return self.net(state)
 
 
 class PIDController:
-    """PID controller for Dubins car to reach goal"""
-    def __init__(self, kp_heading=2.0, kp_speed=0.5):
+    """MODIFIED: PID controller for Dubins car to reach goal - now outputs discrete actions"""
+    def __init__(self, kp_heading=2.0, kp_speed=0.5, num_actions=20):
         self.kp_heading = kp_heading
         self.kp_speed = kp_speed
         self.goal = np.array([2.2, 2.2])  # From DubinsEnv
+        
+        # ADDED: Discrete action parameters
+        self.num_actions = num_actions
+        self.action_low = -1.0
+        self.action_high = 1.0
     
     def get_action(self, state):
-        """Get PID control action based on current state"""
+        """MODIFIED: Get PID control action based on current state - returns continuous action"""
         # Extract position and heading from proprio state
         x, y, theta = state
         
@@ -416,9 +448,18 @@ class PIDController:
         heading_rate = self.kp_heading * heading_error
         
         # Clip to action limits
-        action = np.array([np.clip(heading_rate, -1.0, 1.0)], dtype=np.float32)
+        continuous_action = np.array([np.clip(heading_rate, -1.0, 1.0)], dtype=np.float32)
         
-        return action
+        return continuous_action
+    
+    # ADDED: Get discrete action index
+    def get_action_index(self, state):
+        """Get discrete action index for PID control"""
+        continuous_action = self.get_action(state)
+        action_index = continuous_to_action_index(
+            continuous_action[0], self.num_actions, self.action_low, self.action_high
+        )
+        return action_index
 
 
 def load_world_model(ckpt_dir, device='cuda'):
@@ -429,18 +470,36 @@ def load_world_model(ckpt_dir, device='cuda'):
     train_cfg = OmegaConf.load(str(hydra_cfg))
     num_action_repeat = train_cfg.num_action_repeat
     wm = load_model(snapshot, train_cfg, num_action_repeat, device=device)
+
+
+
+    # finetuned_wm_path = "/storage1/fs1/sibai/Active/ihab/research_new/dino_wm/runs/ddqn_hj_latent/dino_cls-0807_1808/epoch_100/checkpoints/model_latest.pth"
+    # finetuned_wm_state_dict = torch.load(finetuned_wm_path, map_location=device)
+    # # Extract only encoder state dict from the full world model checkpoint
+    # encoder_state_dict = {}
+    # for key, value in finetuned_wm_state_dict.items():
+    #     if key.startswith('encoder.'):
+    #         # Remove 'encoder.' prefix to match the encoder module's expected keys
+    #         encoder_key = key[8:]  # Remove 'encoder.' (8 characters)
+    #         encoder_state_dict[encoder_key] = value
+    # # Load the encoder state dict
+    # wm.encoder.load_state_dict(encoder_state_dict)
+    # print("done")
+    
+    
     wm.eval()
     print(f"Loaded world model from {ckpt_dir}")
     print(f"World model action_dim: {wm.action_dim}, num_action_repeat: {wm.num_action_repeat}")
     print(f"Expected raw action dim: {wm.action_dim // wm.num_action_repeat}")
+    
     return wm
 
 
 def simulate_dubins_with_hj(hj_evaluator, env, mode="switching", max_steps=200, 
                            save_video=True, video_path=".", run_id=0,
-                           safety_threshold=0.0, debug_plot=False):
+                           safety_threshold=0.0, debug_plot=False, use_dynamics=True):
     """
-    Simulate Dubins environment with HJ safety filter
+    MODIFIED: Simulate Dubins environment with HJ safety filter
     
     Args:
         hj_evaluator: HJPolicyEvaluator instance
@@ -451,18 +510,15 @@ def simulate_dubins_with_hj(hj_evaluator, env, mode="switching", max_steps=200,
         video_path: Path to save video
         run_id: Run identifier
         safety_threshold: HJ value threshold for safety (default 0.0)
+        use_dynamics: If True, use world model dynamics for prediction. If False, use critic directly
     """
     
-    # Create PID controller
-    pid_controller = PIDController()
+    # MODIFIED: Create PID controller with discrete actions
+    pid_controller = PIDController(num_actions=hj_evaluator.num_actions)
     
     # Reset environment
     obs, _ = env.reset()
     
-    #CHECK IF THIS IS OKAY#CHECK IF THIS IS OKAY#CHECK IF THIS IS OKAY#CHECK IF THIS IS OKAY#CHECK IF THIS IS OKAY#CHECK IF THIS IS OKAY#CHECK IF THIS IS OKAY
-    #CHECK IF THIS IS OKAY#CHECK IF THIS IS OKAY#CHECK IF THIS IS OKAY#CHECK IF THIS IS OKAY#CHECK IF THIS IS OKAY#CHECK IF THIS IS OKAY#CHECK IF THIS IS OKAY
-    #CHECK IF THIS IS OKAY#CHECK IF THIS IS OKAY#CHECK IF THIS IS OKAY#CHECK IF THIS IS OKAY#CHECK IF THIS IS OKAY#CHECK IF THIS IS OKAY
-    #CHECK IF THIS IS OKAY#CHECK IF THIS IS OKAY#CHECK IF THIS IS OKAY#CHECK IF THIS IS OKAY#CHECK IF THIS IS OKAY
     # Initialize history with current observation and zero actions
     # Get the expected action dimension from the environment
     zero_action = np.zeros(env.action_space.shape[0], dtype=np.float32)
@@ -491,7 +547,8 @@ def simulate_dubins_with_hj(hj_evaluator, env, mode="switching", max_steps=200,
     else:
         initial_state = obs[1]
     
-    print(f"\nStarting simulation in {mode} mode (Run {run_id})...")
+    dynamics_str = "with dynamics" if use_dynamics else "critic only"
+    print(f"\nStarting simulation in {mode} mode ({dynamics_str}) (Run {run_id})...")
     print(f"Initial state: {initial_state}")
     print(f"Initial HJ value: {hj_evaluator.get_hj_value(obs):.3f}")
     
@@ -515,27 +572,46 @@ def simulate_dubins_with_hj(hj_evaluator, env, mode="switching", max_steps=200,
             action = hj_evaluator.get_safe_action(obs)
             using_hj = True
             hj_actions_taken.append(action.copy())
+            
             # Calculate what next HJ would be with this HJ action
-            next_hj_hj = hj_evaluator.predict_next_state_value(obs, action)
+            if use_dynamics:
+                next_hj_hj = hj_evaluator.predict_next_state_value(obs, action)
+            else:
+                # ADDED: Use critic directly without dynamics
+                hj_action_index = hj_evaluator.get_safe_action_index(obs)
+                next_hj_hj = hj_evaluator.get_hj_value_for_action(obs, hj_action_index)
             
         elif mode == "pid_only":
             # Always use PID controller
             action = pid_controller.get_action(proprio_state)
             using_hj = False
             pid_actions_taken.append(action.copy())
+            
             # Calculate what next HJ would be with this PID action
-            next_hj_pid = hj_evaluator.predict_next_state_value(obs, action)
+            if use_dynamics:
+                next_hj_pid = hj_evaluator.predict_next_state_value(obs, action)
+            else:
+                # ADDED: Use critic directly without dynamics
+                pid_action_index = pid_controller.get_action_index(proprio_state)
+                next_hj_pid = hj_evaluator.get_hj_value_for_action(obs, pid_action_index)
             
         else:  # switching mode
             # Get PID action
             pid_action = pid_controller.get_action(proprio_state)
             
-            # Predict HJ value of next state with PID action (with debug info)
-            if step_count < 10:  # Only get debug info for first 10 steps to avoid slowdown
-                next_hj_value, predicted_img, predicted_prop = hj_evaluator.predict_next_state_value(
-                    obs, pid_action, return_debug_info=True)
+            # MODIFIED: Predict HJ value of next state based on use_dynamics flag
+            if use_dynamics:
+                # Use world model dynamics
+                if step_count < 10:  # Only get debug info for first 10 steps to avoid slowdown
+                    next_hj_value, predicted_img, predicted_prop = hj_evaluator.predict_next_state_value(
+                        obs, pid_action, return_debug_info=True)
+                else:
+                    next_hj_value = hj_evaluator.predict_next_state_value(obs, pid_action)
+                    predicted_img, predicted_prop = None, None
             else:
-                next_hj_value = hj_evaluator.predict_next_state_value(obs, pid_action)
+                # ADDED: Use critic directly - Q(s, a_pid)
+                pid_action_index = pid_controller.get_action_index(proprio_state)
+                next_hj_value = hj_evaluator.get_hj_value_for_action(obs, pid_action_index)
                 predicted_img, predicted_prop = None, None
             
             # Switch to safe controller if next state would be unsafe
@@ -557,8 +633,14 @@ def simulate_dubins_with_hj(hj_evaluator, env, mode="switching", max_steps=200,
                 
                 # Store predicted vs actual for debugging
                 predicted_hj_values.append(next_hj_value)
+                
                 # Calculate what next HJ would be with chosen HJ action
-                next_hj_hj = hj_evaluator.predict_next_state_value(obs, action)
+                if use_dynamics:
+                    next_hj_hj = hj_evaluator.predict_next_state_value(obs, action)
+                else:
+                    # ADDED: Use critic directly without dynamics
+                    hj_action_index = hj_evaluator.get_safe_action_index(obs)
+                    next_hj_hj = hj_evaluator.get_hj_value_for_action(obs, hj_action_index)
             else:
                 action = pid_action
                 using_hj = False
@@ -580,8 +662,8 @@ def simulate_dubins_with_hj(hj_evaluator, env, mode="switching", max_steps=200,
             actual_next_hj = hj_evaluator.get_hj_value(obs_next)
             actual_hj_values.append(actual_next_hj)
             
-            # Save comparison images for first few interventions
-            if len(actual_hj_values) <= 40 and step_count < 30:
+            # Save comparison images for first few interventions (only if using dynamics)
+            if use_dynamics and len(actual_hj_values) <= 40 and step_count < 30:
                 save_prediction_comparison(obs, obs_next, predicted_img, predicted_prop, 
                                          proprio_state, step_count, video_path, run_id)
         
@@ -614,6 +696,11 @@ def simulate_dubins_with_hj(hj_evaluator, env, mode="switching", max_steps=200,
             cv2.putText(frame_with_info, f"Controller: {controller_text}", 
                        (10, 65), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 0), 1)
             
+            # ADDED: Line 4: Method used
+            method_text = "Dynamics" if use_dynamics else "Critic"
+            cv2.putText(frame_with_info, f"Method: {method_text}", 
+                       (10, 85), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 0), 1)
+            
             if save_video:
                 frames.append(frame_with_info)
         
@@ -627,7 +714,8 @@ def simulate_dubins_with_hj(hj_evaluator, env, mode="switching", max_steps=200,
                   f"Controller={'HJ' if using_hj else 'PID'}")
     
     # Print summary
-    print(f"\nSimulation ended after {step_count} steps")
+    dynamics_str = "with dynamics" if use_dynamics else "critic only"
+    print(f"\nSimulation ended after {step_count} steps ({dynamics_str})")
     print(f"Minimum HJ value encountered: {min_hj_value:.3f}")
     print(f"Constraint violations: {constraint_violations}")
     if mode == "switching":
@@ -638,7 +726,8 @@ def simulate_dubins_with_hj(hj_evaluator, env, mode="switching", max_steps=200,
     if save_video and frames:
         os.makedirs(video_path, exist_ok=True)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        video_name = f"dubins_hj_{mode}_run{run_id}_{timestamp}.mp4"
+        dynamics_suffix = "dynamics" if use_dynamics else "critic"
+        video_name = f"dubins_hj_{mode}_{dynamics_suffix}_run{run_id}_{timestamp}.mp4"
         full_video_path = os.path.join(video_path, video_name)
         
         with imageio.get_writer(full_video_path, fps=env.metadata["render_fps"]) as writer:
@@ -648,17 +737,17 @@ def simulate_dubins_with_hj(hj_evaluator, env, mode="switching", max_steps=200,
         print(f"Video saved to: {full_video_path}")
     
     # Create debug plots if requested
-    # if debug_plot and mode == "switching" and len(predicted_hj_values) > 0:
     if debug_plot and len(predicted_hj_values) > 0:
         create_debug_plots(predicted_hj_values, actual_hj_values, pid_actions_taken, 
-                          hj_actions_taken, video_path, run_id)
+                          hj_actions_taken, video_path, run_id, use_dynamics)
     
     return {
         'steps': step_count,
         'violations': constraint_violations,
         'hj_interventions': hj_interventions if mode == "switching" else None,
         'min_hj': min_hj_value,
-        'final_cost': cost
+        'final_cost': cost,
+        'use_dynamics': use_dynamics
     }
 
 
@@ -727,12 +816,12 @@ def save_prediction_comparison(obs_current, obs_actual_next, predicted_img, pred
 
 
 def create_debug_plots(predicted_hj_values, actual_hj_values, pid_actions, hj_actions, 
-                      video_path, run_id):
+                      video_path, run_id, use_dynamics):
     """Create debug plots for HJ prediction accuracy and action comparison"""
     fig, axes = plt.subplots(2, 2, figsize=(12, 8))
     
-    # Plot 1: Predicted vs Actual HJ values
-    if len(predicted_hj_values) > 0 and len(actual_hj_values) > 0:
+    # Plot 1: Predicted vs Actual HJ values (only for dynamics mode)
+    if use_dynamics and len(predicted_hj_values) > 0 and len(actual_hj_values) > 0:
         min_len = min(len(predicted_hj_values), len(actual_hj_values))
         pred_vals = predicted_hj_values[:min_len]
         actual_vals = actual_hj_values[:min_len]
@@ -742,7 +831,7 @@ def create_debug_plots(predicted_hj_values, actual_hj_values, pid_actions, hj_ac
                        [min(pred_vals + actual_vals), max(pred_vals + actual_vals)], 'r--', label='Perfect prediction')
         axes[0, 0].set_xlabel('Predicted HJ Value')
         axes[0, 0].set_ylabel('Actual HJ Value')
-        axes[0, 0].set_title('HJ Prediction Accuracy')
+        axes[0, 0].set_title('HJ Prediction Accuracy (Dynamics)')
         axes[0, 0].legend()
         axes[0, 0].grid(True)
         
@@ -752,12 +841,13 @@ def create_debug_plots(predicted_hj_values, actual_hj_values, pid_actions, hj_ac
         axes[0, 1].axhline(y=0, color='k', linestyle='--', alpha=0.5, label='Safety threshold')
         axes[0, 1].set_xlabel('Intervention Number')
         axes[0, 1].set_ylabel('HJ Value')
-        axes[0, 1].set_title('HJ Values Over Time')
+        axes[0, 1].set_title('HJ Values Over Time (Dynamics)')
         axes[0, 1].legend()
         axes[0, 1].grid(True)
     else:
-        axes[0, 0].text(0.5, 0.5, 'No HJ interventions', ha='center', va='center')
-        axes[0, 1].text(0.5, 0.5, 'No HJ interventions', ha='center', va='center')
+        method_str = "Dynamics" if use_dynamics else "Critic Only"
+        axes[0, 0].text(0.5, 0.5, f'No HJ interventions\n({method_str})', ha='center', va='center')
+        axes[0, 1].text(0.5, 0.5, f'No HJ interventions\n({method_str})', ha='center', va='center')
     
     # Plot 3: PID actions distribution
     if len(pid_actions) > 0:
@@ -785,7 +875,8 @@ def create_debug_plots(predicted_hj_values, actual_hj_values, pid_actions, hj_ac
     
     # Save the debug plot
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    debug_plot_path = os.path.join(video_path, f"debug_switching_run{run_id}_{timestamp}.png")
+    dynamics_suffix = "dynamics" if use_dynamics else "critic"
+    debug_plot_path = os.path.join(video_path, f"debug_switching_{dynamics_suffix}_run{run_id}_{timestamp}.png")
     plt.savefig(debug_plot_path, dpi=150, bbox_inches='tight')
     plt.close()
     
@@ -797,92 +888,92 @@ def main():
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     
     # Paths
-    wm_ckpt_dir = "/storage1/fs1/sibai/Active/ihab/research_new/checkpt_dino/output3_frameskip1/dubins/dino_cls"
-    hj_ckpt_dir = "/storage1/fs1/sibai/Active/ihab/research_new/dino_wm/runs/ddpg_hj_latent/dino_cls-0805_1925/epoch_100"
+    wm_ckpt_dir = "/storage1/fs1/sibai/Active/ihab/research_new/checkpt_dino/output3_frameskip1/dubins/scratch"
+    # MODIFIED: Updated path for DDQN checkpoint (no actor needed)
+    hj_ckpt_dir = "/storage1/fs1/sibai/Active/ihab/research_new/dino_wm/runs/ddqn_hj_latent/scratch-0808_1636/epoch_200"
     video_save_path = "/storage1/fs1/sibai/Active/ihab/research_new/dino_wm/dubins_test"
     
-    actor_path = os.path.join(hj_ckpt_dir, "actor.pth")
+    # REMOVED: Actor path (no longer needed)
     critic_path = os.path.join(hj_ckpt_dir, "critic.pth")
     
     # Load world model
     print("Loading world model...")
     wm = load_world_model(wm_ckpt_dir, device)
     
-    # Create HJ evaluator
+    # MODIFIED: Create HJ evaluator for DDQN
     print("Loading HJ policy...")
-    hj_evaluator = HJPolicyEvaluator(actor_path, critic_path, wm, device, with_proprio=True)
+    hj_evaluator = HJPolicyEvaluator(critic_path, wm, device, with_proprio=False, num_actions=20)
     
-    # Run simulations for each mode
+    # MODIFIED: Run simulations for each mode and dynamics setting
     modes = ["switching", "pid_only", "safe_only"]
+    dynamics_settings = [True, False]  # ADDED: Test both dynamics and critic-only approaches
     num_runs_per_mode = 10
     
     all_results = {}
     
-    for mode in modes:
-        print(f"\n{'='*50}")
-        print(f"Running {num_runs_per_mode} simulations in {mode} mode")
-        print(f"{'='*50}")
+    for use_dynamics in dynamics_settings:
+        dynamics_key = "with_dynamics" if use_dynamics else "critic_only"
+        all_results[dynamics_key] = {}
         
-        mode_results = []
-        
-        for run_id in range(num_runs_per_mode):
-            # Create fresh environment for each run
-            env = DubinsEnvForTesting(device)
+        for mode in modes:
+            dynamics_str = "with dynamics" if use_dynamics else "critic only"
+            print(f"\n{'='*50}")
+            print(f"Running {num_runs_per_mode} simulations in {mode} mode ({dynamics_str})")
+            print(f"{'='*50}")
             
-            # Run simulation
-            results = simulate_dubins_with_hj(
-                hj_evaluator=hj_evaluator,
-                env=env,
-                mode=mode,
-                max_steps=200,
-                save_video=True,
-                video_path=video_save_path,
-                run_id=run_id,
-                safety_threshold=0.0,
-                debug_plot=(mode == "switching")  # Only create debug plots for switching mode
-            )
+            mode_results = []
             
-            mode_results.append(results)
-            env.close()
-        
-        all_results[mode] = mode_results
+            for run_id in range(num_runs_per_mode):
+                # Create fresh environment for each run
+                env = DubinsEnvForTesting(device)
+                
+                # Run simulation
+                results = simulate_dubins_with_hj(
+                    hj_evaluator=hj_evaluator,
+                    env=env,
+                    mode=mode,
+                    max_steps=200,
+                    save_video=True,
+                    video_path=video_save_path,
+                    run_id=run_id,
+                    safety_threshold=0.0,
+                    debug_plot=(mode == "switching"),  # Only create debug plots for switching mode
+                    use_dynamics=use_dynamics  # ADDED: Pass dynamics flag
+                )
+                
+                mode_results.append(results)
+                env.close()
+            
+            all_results[dynamics_key][mode] = mode_results
     
-    # Print overall summary
+    # MODIFIED: Print overall summary including dynamics comparison
     print("\n" + "="*70)
     print("OVERALL SUMMARY")
     print("="*70)
     
-    for mode in modes:
-        results = all_results[mode]
-        avg_steps = np.mean([r['steps'] for r in results])
-        avg_violations = np.mean([r['violations'] for r in results])
-        avg_min_hj = np.mean([r['min_hj'] for r in results])
+    for dynamics_key in all_results.keys():
+        dynamics_str = "WITH DYNAMICS" if dynamics_key == "with_dynamics" else "CRITIC ONLY"
+        print(f"\n{dynamics_str}:")
+        print("-" * 30)
         
-        print(f"\n{mode.upper()} MODE:")
-        print(f"  Average steps: {avg_steps:.1f}")
-        print(f"  Average violations: {avg_violations:.1f}")
-        print(f"  Average minimum HJ: {avg_min_hj:.3f}")
-        
-        if mode == "switching":
-            avg_interventions = np.mean([r['hj_interventions'] for r in results])
-            avg_intervention_rate = 100 * avg_interventions / avg_steps
-            print(f"  Average HJ interventions: {avg_interventions:.1f} ({avg_intervention_rate:.1f}%)")
+        for mode in modes:
+            results = all_results[dynamics_key][mode]
+            avg_steps = np.mean([r['steps'] for r in results])
+            avg_violations = np.mean([r['violations'] for r in results])
+            avg_min_hj = np.mean([r['min_hj'] for r in results])
+            
+            print(f"\n  {mode.upper()} MODE:")
+            print(f"    Average steps: {avg_steps:.1f}")
+            print(f"    Average violations: {avg_violations:.1f}")
+            print(f"    Average minimum HJ: {avg_min_hj:.3f}")
+            
+            if mode == "switching":
+                avg_interventions = np.mean([r['hj_interventions'] for r in results])
+                avg_intervention_rate = 100 * avg_interventions / avg_steps
+                print(f"    Average HJ interventions: {avg_interventions:.1f} ({avg_intervention_rate:.1f}%)")
     
     print(f"\nAll videos saved to: {video_save_path}")
 
 
 if __name__ == "__main__":
     main()
-
-
-
-
-
-
-
-
-
-
-# With only one history step the predictor has less temporal context, so its next-state prediction will generally be noisier. If you want stronger initial predictions, bootstrap the history to length num_hist, e.g. by repeating the initial observation and action (or using zeros for prior actions) so that obs_history / action_history contain num_hist entries before calling predict_next_state_value.
-
-# Be careful about alignment: act_0 = act[:, :num_obs_init] in rollout is treated as the action associated with the provided observations. Your update_history should maintain that the stored action is the one that led into the subsequent observation, so when predicting the next state from current obs with a candidate action, the history ideally contains the recent (obs, action) pairs in the same convention the model was trained on.

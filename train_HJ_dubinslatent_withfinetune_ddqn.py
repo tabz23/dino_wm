@@ -781,8 +781,30 @@ def main():
         # COMMENTED OUT: Actor checkpoint no longer needed
         # torch.save(policy.actor.state_dict(), epoch_dir / "actor.pth")
         torch.save(policy.critic.state_dict(), epoch_dir / "critic.pth")
+        # if args.with_finetune :
+        #     # FIXED: Properly unwrap models before saving (matching train.py pattern)
+        #     def unwrap_model_if_needed(model):
+        #         """Unwrap model from DDP/accelerator wrapper if present"""
+        #         if hasattr(model, "module"):
+        #             return model.module  # Unwrap DDP
+        #         return model
+            
+        #     ckpt = {
+        #         # Unwrap each component before saving
+        #         "encoder":         unwrap_model_if_needed(shared_wm.encoder),
+        #         "predictor":       unwrap_model_if_needed(shared_wm.predictor),
+        #         "proprio_encoder": unwrap_model_if_needed(shared_wm.proprio_encoder),
+        #         "action_encoder":  unwrap_model_if_needed(shared_wm.action_encoder),
+        #         # Handle decoder which might be None
+        #         "decoder":         unwrap_model_if_needed(shared_wm.decoder) if shared_wm.decoder is not None else None,
+        #         # Also save the epoch
+        #         "epoch":           epoch,
+        #     }
+        #     torch.save(ckpt, epoch_dir / "model_latest.pth")
         if args.with_finetune and epoch==args.total_episodes:
             torch.save(shared_wm.state_dict(), epoch_dir / "wm.pth")
+
+
 
     print("Training complete.")
 
