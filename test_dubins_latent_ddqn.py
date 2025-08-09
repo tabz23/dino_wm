@@ -473,18 +473,18 @@ def load_world_model(ckpt_dir, device='cuda'):
 
 
 
-    # finetuned_wm_path = "/storage1/fs1/sibai/Active/ihab/research_new/dino_wm/runs/ddqn_hj_latent/dino_cls-0807_1808/epoch_100/checkpoints/model_latest.pth"
-    # finetuned_wm_state_dict = torch.load(finetuned_wm_path, map_location=device)
-    # # Extract only encoder state dict from the full world model checkpoint
-    # encoder_state_dict = {}
-    # for key, value in finetuned_wm_state_dict.items():
-    #     if key.startswith('encoder.'):
-    #         # Remove 'encoder.' prefix to match the encoder module's expected keys
-    #         encoder_key = key[8:]  # Remove 'encoder.' (8 characters)
-    #         encoder_state_dict[encoder_key] = value
-    # # Load the encoder state dict
-    # wm.encoder.load_state_dict(encoder_state_dict)
-    # print("done")
+    finetuned_wm_path = "/storage1/fs1/sibai/Active/ihab/research_new/dino_wm/runs/ddqn_hj_latent/dino_cls-0808_2246/epoch_200/wm.pth"
+    finetuned_wm_state_dict = torch.load(finetuned_wm_path, map_location=device)
+    # Extract only encoder state dict from the full world model checkpoint
+    encoder_state_dict = {}
+    for key, value in finetuned_wm_state_dict.items():
+        if key.startswith('encoder.'):
+            # Remove 'encoder.' prefix to match the encoder module's expected keys
+            encoder_key = key[8:]  # Remove 'encoder.' (8 characters)
+            encoder_state_dict[encoder_key] = value
+    # Load the encoder state dict
+    wm.encoder.load_state_dict(encoder_state_dict)
+    print("done")
     
     
     wm.eval()
@@ -595,6 +595,8 @@ def simulate_dubins_with_hj(hj_evaluator, env, mode="switching", max_steps=200,
                 pid_action_index = pid_controller.get_action_index(proprio_state)
                 next_hj_pid = hj_evaluator.get_hj_value_for_action(obs, pid_action_index)
             
+        # Replace the switching mode section (around line 580-620) with this:
+
         else:  # switching mode
             # Get PID action
             pid_action = pid_controller.get_action(proprio_state)
@@ -631,16 +633,15 @@ def simulate_dubins_with_hj(hj_evaluator, env, mode="switching", max_steps=200,
                 last_controller = "HJ"
                 hj_actions_taken.append(action.copy())
                 
-                # Store predicted vs actual for debugging
-                predicted_hj_values.append(next_hj_value)
-                
-                # Calculate what next HJ would be with chosen HJ action
+                # MODIFIED: Store predicted HJ value for the HJ action that was actually taken
                 if use_dynamics:
                     next_hj_hj = hj_evaluator.predict_next_state_value(obs, action)
                 else:
-                    # ADDED: Use critic directly without dynamics
                     hj_action_index = hj_evaluator.get_safe_action_index(obs)
                     next_hj_hj = hj_evaluator.get_hj_value_for_action(obs, hj_action_index)
+                
+                predicted_hj_values.append(next_hj_hj)  # Store HJ prediction for HJ action
+                
             else:
                 action = pid_action
                 using_hj = False
@@ -649,6 +650,9 @@ def simulate_dubins_with_hj(hj_evaluator, env, mode="switching", max_steps=200,
                 last_controller = "PID"
                 pid_actions_taken.append(action.copy())
                 next_hj_pid = next_hj_value
+                
+                # ADDED: Store predicted HJ value for the PID action that was actually taken
+                predicted_hj_values.append(next_hj_value)  # Store PID prediction for PID action
         
         # Step environment
         obs_next, cost, terminated, truncated, info = env.step(action)
@@ -821,7 +825,8 @@ def create_debug_plots(predicted_hj_values, actual_hj_values, pid_actions, hj_ac
     fig, axes = plt.subplots(2, 2, figsize=(12, 8))
     
     # Plot 1: Predicted vs Actual HJ values (only for dynamics mode)
-    if use_dynamics and len(predicted_hj_values) > 0 and len(actual_hj_values) > 0:
+    if len(predicted_hj_values) > 0 and len(actual_hj_values) > 0:
+        method_str = "Dynamics" if use_dynamics else "Critic Only"
         min_len = min(len(predicted_hj_values), len(actual_hj_values))
         pred_vals = predicted_hj_values[:min_len]
         actual_vals = actual_hj_values[:min_len]
@@ -831,7 +836,7 @@ def create_debug_plots(predicted_hj_values, actual_hj_values, pid_actions, hj_ac
                        [min(pred_vals + actual_vals), max(pred_vals + actual_vals)], 'r--', label='Perfect prediction')
         axes[0, 0].set_xlabel('Predicted HJ Value')
         axes[0, 0].set_ylabel('Actual HJ Value')
-        axes[0, 0].set_title('HJ Prediction Accuracy (Dynamics)')
+        axes[0, 0].set_title(f'HJ Prediction Accuracy ({method_str})')
         axes[0, 0].legend()
         axes[0, 0].grid(True)
         
@@ -841,7 +846,7 @@ def create_debug_plots(predicted_hj_values, actual_hj_values, pid_actions, hj_ac
         axes[0, 1].axhline(y=0, color='k', linestyle='--', alpha=0.5, label='Safety threshold')
         axes[0, 1].set_xlabel('Intervention Number')
         axes[0, 1].set_ylabel('HJ Value')
-        axes[0, 1].set_title('HJ Values Over Time (Dynamics)')
+        axes[0, 1].set_title(f'HJ Values Over Time ({method_str})')
         axes[0, 1].legend()
         axes[0, 1].grid(True)
     else:
@@ -888,9 +893,9 @@ def main():
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     
     # Paths
-    wm_ckpt_dir = "/storage1/fs1/sibai/Active/ihab/research_new/checkpt_dino/output3_frameskip1/dubins/scratch"
+    wm_ckpt_dir = "/storage1/fs1/sibai/Active/ihab/research_new/checkpt_dino/output3_frameskip1/dubins/dino_cls"
     # MODIFIED: Updated path for DDQN checkpoint (no actor needed)
-    hj_ckpt_dir = "/storage1/fs1/sibai/Active/ihab/research_new/dino_wm/runs/ddqn_hj_latent/scratch-0808_1636/epoch_200"
+    hj_ckpt_dir = "/storage1/fs1/sibai/Active/ihab/research_new/dino_wm/runs/ddqn_hj_latent/dino_cls-0808_2246/epoch_200"
     video_save_path = "/storage1/fs1/sibai/Active/ihab/research_new/dino_wm/dubins_test"
     
     # REMOVED: Actor path (no longer needed)
@@ -902,12 +907,14 @@ def main():
     
     # MODIFIED: Create HJ evaluator for DDQN
     print("Loading HJ policy...")
-    hj_evaluator = HJPolicyEvaluator(critic_path, wm, device, with_proprio=False, num_actions=20)
+    hj_evaluator = HJPolicyEvaluator(critic_path, wm, device, with_proprio=False, num_actions=3)
     
     # MODIFIED: Run simulations for each mode and dynamics setting
-    modes = ["switching", "pid_only", "safe_only"]
+    # modes = ["switching", "pid_only", "safe_only"]
+    modes = ["switching", "safe_only"]
     dynamics_settings = [True, False]  # ADDED: Test both dynamics and critic-only approaches
-    num_runs_per_mode = 10
+    dynamics_settings = [False]
+    num_runs_per_mode = 20
     
     all_results = {}
     
