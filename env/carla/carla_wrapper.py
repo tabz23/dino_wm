@@ -1,6 +1,19 @@
 from car_dreamer.carla_follow_env import CarlaFollowEnv
 import numpy as np
 import torch
+import carla
+from typing import Tuple
+
+def get_vehicle_velocity(vehicle: carla.Actor) -> Tuple[float, float]:
+    """
+    Get the velocity of a vehicle.
+
+    :param vehicle: carla.Actor
+
+    :return: tuple(float, float), x, y velocity of the vehicle
+    """
+    velocity = vehicle.get_velocity()
+    return velocity.x, velocity.y
 
 def aggregate_dcts(dcts):
     full_dct = {}
@@ -17,17 +30,23 @@ def aggregate_dcts(dcts):
     return full_dct
 
 class CarlaWrapper(CarlaFollowEnv):
-    def __init__(self, config):
+    def __init__(self, config, with_speed = False):
         super().__init__(config)
+        self.with_speed = with_speed
         # self.action_space = self._get_action_space().
 
     def get_obs(self, obs):
         """
         Extract image observation from the observation dictionary.
         """
+        proprio = np.array(self.state()[:6])
+        if self.with_speed:
+            speed = get_vehicle_velocity(self.ego)
+            proprio = np.concatenate((proprio, speed))
         return {
             'visual': obs['camera'],
-            'proprio': self.state()[0]
+            'proprio': proprio,
+            'raw': obs
         }
 
     def sample_random_init_goal_states(self, seed):

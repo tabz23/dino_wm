@@ -16,6 +16,7 @@ class CarlaDataset(TrajDataset):
         n_rollout: Optional[int] = None,
         with_costs: bool = True,
         only_cost: bool = False,
+        with_velocity: bool = True,
     ):
         self.data_path = Path(data_path)
         self.transform = transform 
@@ -24,7 +25,7 @@ class CarlaDataset(TrajDataset):
         self.states = [traj.float() for traj in torch.load(self.data_path / "states.pth")]
         self.actions = [traj.float() for traj in torch.load(self.data_path / "actions.pth")]
         self.seq_lengths = torch.load(self.data_path / "seq_lengths.pth").long()
-        self.costs = [traj.float() for traj in torch.load(self.data_path / "distances.pth")]
+        self.costs = [traj.float() for traj in torch.load(self.data_path / "costs.pth")]
 
         self.n_rollout = n_rollout
         if self.n_rollout:
@@ -36,7 +37,10 @@ class CarlaDataset(TrajDataset):
         self.actions = self.actions[:n]
         self.seq_lengths = self.seq_lengths[:n]
         
-        self.proprios = [traj[:, :6] for traj in self.states] 
+        if with_velocity:
+            self.proprios = [traj[:, :7] for traj in self.states] 
+        else:
+            self.proprios = [traj[:, :6] for traj in self.states] 
 
         self.action_dim = self.actions[0].shape[-1]
         self.state_dim = self.states[0].shape[-1]
