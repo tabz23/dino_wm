@@ -81,7 +81,7 @@ def get_args_and_merge_config():
     #                 help='Hidden sizes for control policy (expects 3 integers)')
     
     # ADDED: Number of discrete actions for DDQN
-    parser.add_argument('--num_actions', type=int, default=20,
+    parser.add_argument('--num_actions', type=int, default=3,
                     help='Number of discrete actions spanning -1 to 1')
     
     args, remaining = parser.parse_known_args()
@@ -642,6 +642,161 @@ class ParallelEnvCollector:
 
                 if steps >= max_steps:
                     break
+def plot_best_actions_grid(policy, helper_env, wm, thetas, args, device):
+    """Plot the best action (argmax Q) at each state in a grid"""
+    # Fixed resolution for action plotting
+    nx_actions = 30
+    ny_actions = 30
+    
+    xs = np.linspace(args.x_min, args.x_max, nx_actions)
+    ys = np.linspace(args.y_min, args.y_max, ny_actions)
+    
+    if len(thetas) == 1:
+        fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+        axes = [axes]
+    else:
+        fig, axes = plt.subplots(len(thetas), 2, figsize=(14, 6*len(thetas)))
+    
+    for i, theta in enumerate(thetas):
+        # Create grid of states
+        xx, yy = np.meshgrid(xs, ys, indexing='ij')
+        states = np.stack([xx.ravel(), yy.ravel(), np.full(nx_actions * ny_actions, theta)], axis=1)
+        
+        # Batch process observations
+        obs_list = []
+        for state in states:
+            obs_dict, _ = helper_env.env.reset(state=state)
+            obs_list.append(obs_dict)
+        
+        # Process in batches
+        batch_size = min(256, len(obs_list))
+        all_best_actions = []
+        all_q_values = []
+        
+        with torch.no_grad():
+            for j in range(0, len(obs_list), batch_size):
+                batch = obs_list[j:j+batch_size]
+                z = encode_batch_optimized(batch, wm, device, args.with_proprio, requires_grad=False)
+                
+                # Get Q-values for all actions
+                q_vals = policy.critic(z)  # Shape: (batch_size, num_actions)
+                
+                # Get best action indices
+                best_action_indices = q_vals.argmax(dim=1)  # (batch_size,)
+                
+                # Convert to continuous actions
+                best_continuous_actions = action_index_to_continuous(
+                    best_action_indices.cpu().numpy(),
+                    policy.num_actions,
+                    policy.action_low,
+                    policy.action_high
+                )
+                
+                all_best_actions.extend(best_continuous_actions)
+                all_q_values.append(q_vals.cpu().numpy())
+        
+        # Reshape for plotting
+        best_actions_grid = np.array(all_best_actions).reshape(nx_actions, ny_actions)
+        all_q_values_array = np.concatenate(all_q_values).reshape(nx_actions, ny_actions, policy.num_actions)
+        
+        # Plot 1: Best action at each state
+        im1 = axes[i][0].imshow(
+            best_actions_grid.T,
+            extent=(args.x_min, args.x_max, args.y_min, args.y_max),
+            origin="lower",
+            cmap='RdBu',  # Red = -1 (left), Blue = 1 (right), White = 0 (straight)
+            vmin=-1.0,
+            vmax=1.0
+        )
+        axes[i][0].set_title(f"θ={theta:.2f} - Best Action (argmax Q)")
+        axes[i][0].set_xlabel("x")
+        axes[i][0].set_ylabel("y")
+        fig.colorbar(im1, ax=axes[i][0], label="Action Value")
+        
+        # Add quiver plot to show action directions
+        skip = 3  # Show arrows every 3rd grid point for clarity
+        X, Y = xx[::skip, ::skip], yy[::skip, ::skip]
+        U = np.cos(theta) * np.ones_like(X)  # Forward direction based on theta
+        V = np.sin(theta) * np.ones_like(Y)
+        # Rotate by action value (steering angle)
+        actions_subset = best_actions_grid[::skip, ::skip]
+        U_rot = U * np.cos(actions_subset) - V * np.sin(actions_subset)
+        V_rot = U * np.sin(actions_subset) + V * np.cos(actions_subset)
+        
+        axes[i][0].quiver(X, Y, U_rot, V_rot, 
+                         actions_subset,  # Color by action value
+                         cmap='RdBu', alpha=0.7, scale=30)
+        
+        # Plot 2: Q-value difference (to see confidence in action selection)
+        # Show difference between best and second-best Q-value
+        q_sorted = np.sort(all_q_values_array, axis=2)
+        q_diff = q_sorted[:, :, -1] - q_sorted[:, :, -2] if policy.num_actions > 1 else q_sorted[:, :, -1]
+        
+        im2 = axes[i][1].imshow(
+            q_diff.T,
+            extent=(args.x_min, args.x_max, args.y_min, args.y_max),
+            origin="lower",
+            cmap='viridis'
+        )
+        axes[i][1].set_title(f"θ={theta:.2f} - Q-value Confidence (Q_best - Q_second)")
+        axes[i][1].set_xlabel("x")
+        axes[i][1].set_ylabel("y")
+        fig.colorbar(im2, ax=axes[i][1], label="Q-value Difference")
+    
+    fig.tight_layout()
+    return fig
+
+
+def plot_all_q_values_comparison(policy, helper_env, wm, theta, position, args, device):
+    """
+    Plot Q-values for all actions at a specific position
+    Useful for debugging what the network thinks about each action
+    """
+    # Reset to the specific state
+    state = np.array([position[0], position[1], theta])
+    obs_dict, _ = helper_env.env.reset(state=state)
+    
+    # Encode observation
+    z = encode_batch_optimized([obs_dict], wm, device, args.with_proprio, requires_grad=False)
+    
+    with torch.no_grad():
+        q_vals = policy.critic(z).squeeze().cpu().numpy()  # (num_actions,)
+    
+    # Create bar plot
+    fig, ax = plt.subplots(1, 1, figsize=(10, 6))
+    
+    action_values = policy.action_grid  # The actual continuous action values
+    colors = ['red' if q < 0 else 'green' for q in q_vals]
+    
+    bars = ax.bar(range(policy.num_actions), q_vals, color=colors, alpha=0.7)
+    
+    # Add action values as x-tick labels
+    ax.set_xticks(range(policy.num_actions))
+    ax.set_xticklabels([f"{a:.2f}" for a in action_values], rotation=45)
+    
+    ax.set_xlabel("Action Value (Steering)")
+    ax.set_ylabel("Q-value")
+    ax.set_title(f"Q-values at position ({position[0]:.1f}, {position[1]:.1f}), θ={theta:.2f}")
+    ax.axhline(y=0, color='k', linestyle='--', alpha=0.5, label='Safety Threshold')
+    
+    # Highlight the best action
+    best_idx = np.argmax(q_vals)
+    ax.scatter(best_idx, q_vals[best_idx], color='blue', s=100, zorder=5, 
+              label=f'Best Action: {action_values[best_idx]:.2f}')
+    
+    # Add grid
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+    
+    # Add text annotations for Q-values
+    for i, (bar, q) in enumerate(zip(bars, q_vals)):
+        height = bar.get_height()
+        ax.text(bar.get_x() + bar.get_width()/2., height,
+                f'{q:.2f}', ha='center', va='bottom' if q > 0 else 'top',
+                fontsize=8)
+    
+    fig.tight_layout()
+    return fig
 
 def main():
     args = get_args_and_merge_config()
@@ -656,7 +811,12 @@ def main():
     args.total_episodes = int(args.total_episodes)
     args.batch_size_pyhj = int(args.batch_size_pyhj)
     args.buffer_size = int(args.buffer_size)
-    args.dino_ckpt_dir = os.path.join(args.dino_ckpt_dir, args.dino_encoder)
+    if "full_scratch" in args.dino_encoder:
+        args.dino_ckpt_dir = os.path.join(args.dino_ckpt_dir, "vc1")
+        args.with_finetune = True
+        
+    else:
+        args.dino_ckpt_dir = os.path.join(args.dino_ckpt_dir, args.dino_encoder)
     
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
@@ -671,6 +831,8 @@ def main():
         torch.backends.cudnn.benchmark = True
 
     shared_wm = load_shared_world_model(args.dino_ckpt_dir, device)
+    
+
     if args.with_finetune:
         shared_wm.train_encoder = True
         for p in shared_wm.parameters():
@@ -681,6 +843,16 @@ def main():
         for p in shared_wm.parameters():
             p.requires_grad = False
         shared_wm.eval()
+
+    if "full_scratch" in args.dino_encoder:
+        print("training vc1 from scratch")
+        for m in shared_wm.modules():
+            if isinstance(m, (torch.nn.Conv2d, torch.nn.Linear)):
+                torch.nn.init.xavier_uniform_(m.weight)
+        for p in shared_wm.parameters():
+            p.requires_grad = True
+
+
 
     train_envs = [RawDubinsEnv(device=device, with_proprio=args.with_proprio) for _ in range(args.training_num)]
     test_envs = [RawDubinsEnv(device=device, with_proprio=args.with_proprio) for _ in range(args.test_num)]
@@ -749,7 +921,7 @@ def main():
         print(f"\n=== Epoch {epoch}/{args.total_episodes} ===")
         
         # Collect data in parallel
-        collector.collect_trajectories(buffer)
+        collector.collect_trajectories(buffer,5000)
         
         # Train with progress bar
         pbar = tqdm(range(args.step_per_epoch), desc=f"Epoch {epoch}", unit="step")
@@ -765,15 +937,45 @@ def main():
             })
             wandb.log(metrics, step=epoch * args.step_per_epoch + step)
         pbar.close()
-
         # Plot HJ using optimized function
         fig1, fig2 = plot_hj_optimized(policy, helper_env, shared_wm, thetas, args, device)
+        
+        # NEW: Plot best actions grid
+        fig_actions = plot_best_actions_grid(policy, helper_env, shared_wm, thetas, args, device)
+        
+        # NEW: Plot Q-values at specific positions (near obstacles)
+        # You can adjust these positions based on where your obstacles are
+        test_positions = [
+            (1.0, 1.0),   # Near obstacle
+            (-1.0,1.0),
+            (0.0,0.0),
+            (0.5,-2),
+            (0.5,1),
+            (-0.5,2),
+            (2.0, 2.0),   # Goal position
+            (0.5, 0.5),   # Starting area
+        ]
+        
+        for pos in test_positions:
+            fig_q = plot_all_q_values_comparison(
+                policy, helper_env, shared_wm, 
+                theta=0.0,  # You can vary this
+                position=pos,
+                args=args, device=device
+            )
+            wandb.log({
+                f"Q_values_at_{pos[0]}_{pos[1]}": wandb.Image(fig_q)
+            })
+            plt.close(fig_q)
+        
         wandb.log({
             "HJ_latent/binary": wandb.Image(fig1),
             "HJ_latent/continuous": wandb.Image(fig2),
+            "HJ_latent/best_actions": wandb.Image(fig_actions),  # NEW
         })
         plt.close(fig1)
         plt.close(fig2)
+        plt.close(fig_actions)
 
         # Save checkpoints
         epoch_dir = log_dir / f"epoch_{epoch}"
@@ -801,7 +1003,7 @@ def main():
         #         "epoch":           epoch,
         #     }
         #     torch.save(ckpt, epoch_dir / "model_latest.pth")
-        if args.with_finetune and epoch==args.total_episodes:
+        if args.with_finetune and epoch%20==0:
             torch.save(shared_wm.state_dict(), epoch_dir / "wm.pth")
 
 
@@ -824,3 +1026,17 @@ MODIFIED: Now using DDQN with discrete action space instead of DDPG with continu
 
 
 # python "/storage1/fs1/sibai/Active/ihab/research_new/dino_wm/train_HJ_dubinslatent_withfinetune_ddqn.py" --dino_ckpt_dir "/storage1/fs1/sibai/Active/ihab/research_new/checkpt_dino/output3_frameskip1/dubins"  --config train_HJ_configs.yaml --dino_encoder dino_cls --nx 50 --ny 50 --step-per-epoch 200 --total-episodes 100 --batch_size-pyhj 64 --gamma-pyhj 0.99 --actor-gradient-steps 2 --critic-net 128 128 128  --control-net 128 128 128  --with_finetune --encoder_lr 1e-6
+
+
+
+# -1.0 (Red) = Turn hard left
+# 0.0 (White) = Go straight
+# +1.0 (Blue) = Turn hard right
+
+
+# Right Subplot - "Q-value Difference" Colorbar:
+# This shows the confidence of the action selection: Q(best_action) - Q(second_best_action)
+
+# High values (yellow) = Large gap between best and second-best action → Network is confident
+# Low values (dark purple) = Small gap → Network thinks multiple actions are similarly good/bad
+# Near zero = Network can't distinguish between actions
