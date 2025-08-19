@@ -101,6 +101,22 @@ def load_dreamer():
     import yaml
     parser = argparse.ArgumentParser()
     parser.add_argument("--configs", nargs="+")
+    parser.add_argument(
+        "--with_proprio", action="store_true",
+        help="Flag to include proprioceptive information in latent encoding"
+    )
+    parser.add_argument(
+        "--dino_encoder", type=str, default="dino_cls",
+        help="Which encoder to use: dino, r3m, vc1, resnet, dino_cls."
+    )
+    parser.add_argument(
+        "--with_finetune", action="store_true",
+        help="Flag to fine-tune the encoder backbone"
+    )
+    parser.add_argument(
+        "--encoder_lr", type=float, default=1e-5,
+        help="Learning rate for the encoder fine-tuning"
+    )
     configs = yaml.safe_load(
             (pathlib.Path("/storage1/fs1/sibai/Active/ihab/research_new/SafeDreamer/hj/configs.yaml")).read_text()
         )
