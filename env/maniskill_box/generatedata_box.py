@@ -1,4 +1,3 @@
-import gymnasium as gym
 import mani_skill.envs
 import torch
 import torch.nn as nn
@@ -7,6 +6,10 @@ import argparse
 from pathlib import Path
 import os
 import numpy as np
+import os
+os.environ['MUJOCO_GL'] = 'egl'  # or 'osmesa' or 'egl'
+os.environ['PYOPENGL_PLATFORM'] = 'egl'
+import gymnasium as gym
 
 
 class CheckpointController:
@@ -212,12 +215,20 @@ def collect_episodes(name, num_episodes, max_steps, obs_mode, output_dir):
     all_states = []
     all_costs = []
     seq_lengths = []
-
+    ckpt_1 = "/storage1/fs1/sibai/Active/ihab/research_new/ManiSkill/examples/baselines/ppo/runs/UnitreeG1TransportBox-v1__ppo__1__1750797444/ckpt_676.pt"
+    ckpt_2 = "/storage1/fs1/sibai/Active/ihab/research_new/ManiSkill/examples/baselines/ppo/runs/UnitreeG1TransportBox-v1__ppo__1__1750797444/ckpt_701.pt"
+    ckpt_3 = "/storage1/fs1/sibai/Active/ihab/research_new/ManiSkill/examples/baselines/ppo/runs/UnitreeG1TransportBox-v1__ppo__1__1750797444/ckpt_1251.pt"
     for episode_idx in range(num_episodes):
         print(f"Episode {episode_idx + 1}/{num_episodes}")
         #Initalize environment 
         env = gym.make(name, obs_mode = obs_mode, sensor_configs = dict(width = 224, height = 224))
-        checkpoint_path = "/Users/maxwellastafyev/Desktop/ckpt_676.pt"
+        if episode_idx < 1300:
+            checkpoint_path = ckpt_1
+        elif episode_idx < 1700:
+            checkpoint_path = ckpt_2
+        else:
+            checkpoint_path = ckpt_3
+        checkpoint_path = ckpt_3
         controller = CheckpointController(checkpoint_path, env,deterministic = True )
         episode_actions = []
         episode_states = []
@@ -233,16 +244,11 @@ def collect_episodes(name, num_episodes, max_steps, obs_mode, output_dir):
             episode_states.append(state)
             image = env.unwrapped.render_sensors().squeeze(0)[: , -224:, :]
             episode_obs.append(image)
-            if episode_idx < 5:
-                action = env.action_space.sample()
-            else:
-                action = controller.get_action(obs)
+            action = controller.get_action(obs)
             episode_actions.append(torch.tensor(action, dtype = torch.float32).squeeze())
-
             obs, _, terminated, truncated, _ = env.step(action)
             cost = calculate_cost(env)
             episode_costs.append(torch.tensor(cost,dtype = torch.float32))
-
             if terminated or truncated:
                 break
 
@@ -286,10 +292,10 @@ def main():
     #Added argparser so that all variables can be changed easily 
     parser = argparse.ArgumentParser(description= ' Record Maniskill')
     parser.add_argument('--name', type= str, default= "UnitreeG1TransportBox-v1", help = 'Name of environment')
-    parser.add_argument('--num-episodes', type = int, default = 1)
-    parser.add_argument('--max-steps', type = int, default = 300, help = 'Number of steps')
+    parser.add_argument('--num-episodes', type = int, default = 2000)
+    parser.add_argument('--max-steps', type = int, default = 100, help = 'Number of steps')
     parser.add_argument('--obs-mode',type = str, default = "state", help = 'Observation mode')
-    parser.add_argument('--output-dir', type = str, default = '/users/maxwellastafyev/Desktop/Box_env')
+    parser.add_argument('--output-dir', type = str, default = '/storage1/fs1/sibai/Active/ihab/research_new/datasets_dino/maniskill_box_1')
     args = parser.parse_args()
     
     collect_episodes(args.name, args.num_episodes, args.max_steps, args.obs_mode, args.output_dir)
