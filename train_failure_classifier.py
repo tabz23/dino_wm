@@ -68,6 +68,12 @@ def get_args_and_merge_config():
     parser.add_argument(
     "--single_layer_classifier", default=False, action='store_true',
     )
+    parser.add_argument(
+    "--epochs", type=int, default=2,
+    help="Number of training epochs"
+    )
+
+    
 
     args, remaining = parser.parse_known_args()
 
@@ -84,7 +90,8 @@ def get_args_and_merge_config():
 
     # 4) Merge everything back into the top‐level args namespace
     for key, val in vars(cfg_args).items():
-        setattr(args, key.replace("-", "_"), val)
+        if not hasattr(args, key) or getattr(args, key) == parser.get_default(key):
+            setattr(args, key.replace("-", "_"), val)
 
     return args
 
@@ -250,8 +257,8 @@ def train(fc, train_dataloader, val_dataloader, args, logger):
                     z_safe = fc.encode(obs_safe)
                     z_unsafe = fc.encode(obs_unsafe)
                     N = min(z_safe.shape[0], z_unsafe.shape[0])
-                    z_safe = z_safe[:N]
-                    z_unsafe = z_unsafe[:N]
+                    z_safe = z_safe[:N].detach()
+                    z_unsafe = z_unsafe[:N].detach()
                     alpha = torch.rand(z_safe.shape[0], 1, device=args.device)
                     interpolated_z = alpha * z_safe + (1 - alpha) * z_unsafe
                     interpolated_z.requires_grad = True
@@ -262,7 +269,7 @@ def train(fc, train_dataloader, val_dataloader, args, logger):
                     loss = loss_safe.mean() + loss_unsafe.mean() + 0*loss_unsafe_weak.mean() + args.gp_weight * loss_gradient_penalty.mean()
                 else:
                     loss = loss_safe.mean() + loss_unsafe.mean() + 0*loss_unsafe_weak.mean()
-                pbar.set_postfix(loss=loss.item(),loss_safe=loss_safe.mean().item(),loss_unsafe=loss_unsafe.mean().item(),loss_gradient_penalty=loss_gradient_penalty.mean().item() if args.gradient_penalty else 0,acc=acc)
+                pbar.set_postfix(loss=loss.item(),loss_safe=loss_safe.mean().item(),loss_unsafe=loss_unsafe.mean().item(),loss_gp=loss_gradient_penalty.mean().item() if args.gradient_penalty else 0,acc=acc, h_s=logits_safe.mean().item(), h_u=logits_unsafe.mean().item())
             train_stats['loss'].append(loss.item())
             # train_stats['loss_unsafe_weak'].append(loss_unsafe_weak.mean().item())
             if args.gradient_penalty:
@@ -357,8 +364,8 @@ def test(fc, test_dataloader, args, logger):
             loss = loss_safe.mean() + loss_unsafe.mean() + 0*loss_unsafe_weak.mean()
     if args.gradient_penalty:
         N = min(logits_safe.shape[0], logits_unsafe.shape[0])
-        z_safe = total_z[total_labels == 0][:N]
-        z_unsafe = total_z[total_labels == 1][:N]
+        z_safe = total_z[total_labels == 0][:N].detach()
+        z_unsafe = total_z[total_labels == 1][:N].detach()
         alpha = torch.rand(z_safe.shape[0], 1, device=args.device)  
         interpolated_z = alpha * z_safe + (1 - alpha) * z_unsafe
         interpolated_z.requires_grad = True
@@ -425,15 +432,19 @@ def main():
     sampler_train = torch.utils.data.WeightedRandomSampler(weights=weights, num_samples=len(train_data), replacement=True)
     train_dataloader = torch.utils.data.DataLoader(
         # train_data, batch_size=args.batch_size, shuffle=True
-        train_data, batch_size=args.batch_size, sampler = sampler_train
+        train_data, batch_size=args.batch_size, sampler = sampler_train, drop_last=True
     )
     val_dataloader = torch.utils.data.DataLoader(
-        val_data, batch_size=args.batch_size, shuffle=False
+        val_data, batch_size=args.batch_size, shuffle=False,
     )
 
 
-    backbones = ["r3m","vc1","resnet","dino","dino_cls","scratch","full_scratch"]
-    # backbones = ["full_scratch"]
+    backbones = ["scratch", "resnet", "full_scratch", "vc1", "dino", "dino_cls","r3m"]
+    # backbones = ["dino_cls","scratch","full_scratch"]
+    # backbones = ["resnet", "vc1", "full_scratch", "r3m","dino"]
+    # backbones = ["resnet","dino","dino_cls","scratch","full_scratch"]
+    #backbones = ["r3m"]
+    # backbones = ["full_scratch","dino"]
     if args.finetune:
         backbones = backbones[:-1]
     save_path = Path(args.save_path)
@@ -497,8 +508,10 @@ def main():
             for p in wm.parameters():
                 p.requires_grad = True
         if args.finetune or (backbone == "full_scratch"):
+            print("freeze_wm: False")
             args.freeze_wm = False
         else:
+            print("freeze_wm: True")
             args.freeze_wm = True
 
         obs, _, _, _, _ = next(iter(val_dataloader))
@@ -532,8 +545,9 @@ if __name__ == "__main__":
     # bsub -gpu "num=1" -R "rusage[mem=40]" -q gpu-compute-debug -Is /bin/bash 
     # bsub -Is /bin/bash 
     # bsub -G compute-sibai < script_yuxuan.sh
+    # bsub -G compute-sibai < bsub.sh
     # bsub -n 12 -q general-interactive -Is -G compute-sibai -R 'rusage[mem=102GB]' -M 100GB -R 'gpuhost' -gpu "num=1:gmem=30G" -a 'docker(continuumio/anaconda3:2021.11)' -env "LSF_DOCKER_VOLUMES=/storage1/fs1/sibai/Active:/storage1/fs1/sibai/Active,LSF_DOCKER_SHM_SIZE=32g" /bin/bash
-
+    # bsub -n 12 -q general-interactive -Is -G compute-sibai -R 'rusage[mem=102GB]' -M 100GB -R 'gpuhost' -gpu "num=1:gmem=30G" -a 'docker(maniskill/base)' -env "LSF_DOCKER_VOLUMES=/storage1/fs1/sibai/Active:/storage1/fs1/sibai/Active,LSF_DOCKER_SHM_SIZE=32g" -u y.yuxuan@wustl.edu /bin/bash
 
     # train_dataloader = torch.utils.data.DataLoader(
     #     # train_data, batch_size=args.batch_size, shuffle=True
