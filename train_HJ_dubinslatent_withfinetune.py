@@ -644,7 +644,11 @@ def main():
     args.total_episodes = int(args.total_episodes)
     args.batch_size_pyhj = int(args.batch_size_pyhj)
     args.buffer_size = int(args.buffer_size)
-    args.dino_ckpt_dir = os.path.join(args.dino_ckpt_dir, args.dino_encoder)
+    if "full_scratch" in args.dino_encoder:
+        args.dino_ckpt_dir = os.path.join(args.dino_ckpt_dir, "vc1")
+        args.with_finetune = True
+    else:
+        args.dino_ckpt_dir = os.path.join(args.dino_ckpt_dir, args.dino_encoder)
     
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
