@@ -71,6 +71,7 @@ class CarGoal:
         obs["is_terminal"] = terminated or truncated
         obs["is_first"] = False
         info["cost"] = cost
+        info["reward"] = reward
         done = terminated or truncated
         return obs, cost, done, info
 
@@ -81,6 +82,7 @@ class CarGoal:
         obs["image"] = obs_dict["vision"]
         obs["vector"] = obs_dict["vector"]
         info["cost"] = 0
+        info["reward"] = 0
         return obs
 
     def render(self, *args, **kwargs):
