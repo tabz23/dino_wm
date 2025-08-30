@@ -85,7 +85,7 @@ def visualize_saliency(image, saliency_map,
     im1 = axes[1].imshow(
         saliency_map, cmap="hot", interpolation="bilinear", resample=True
     )
-    axes[1].set_title("Saliency (red = important)")
+    axes[1].set_title("Saliency ")
     axes[1].axis("off")
     plt.colorbar(im1, ax=axes[1], fraction=0.046, pad=0.04)
 
@@ -324,7 +324,11 @@ def main():
     torch.manual_seed(args.seed); np.random.seed(args.seed)
 
     # ---------- world‑model ----------
-    ckpt_dir = Path(f"/storage1/fs1/sibai/Active/ihab/research_new/checkpt_dino/outputs/dubins/fully_trained_prop_repeated_3_times/{args.backbone}")
+   
+    # ckpt_dir = Path(f"/storage1/fs1/sibai/Active/ihab/research_new/checkpt_dino/outputs/dubins/fully_trained_prop_repeated_3_times/{args.backbone}")
+   
+    ckpt_dir=#to fix
+   
     hydra_cfg = ckpt_dir / 'hydra.yaml'
     wm_snapshot = ckpt_dir / 'checkpoints' / 'model_latest.pth'
     
@@ -335,8 +339,11 @@ def main():
     wm = load_model(wm_snapshot, train_cfg, num_action_repeat, device=args.device)
     wm.eval()
     # ---------- classifier ----------
-    cls_sub = "classifier-with-proprio" if args.with_proprio else "classifier-without-proprio"
-    cls_path = ckpt_dir / cls_sub / f"dubins1800_withcost_{args.backbone}" / "failure_classifier.pth"
+    # cls_sub = "classifier-with-proprio" if args.with_proprio else "classifier-without-proprio"
+    # cls_path = ckpt_dir / cls_sub / f"dubins1800_withcost_{args.backbone}" / "failure_classifier.pth"
+    
+    cls_path= #to fix
+    
     # build dummy obs to size FC layer
     _, val_slices, _, _ = load_data(args.task, args.data_path, args.seed)
     val_loader = torch.utils.data.DataLoader(val_slices, batch_size=1, shuffle=True)
@@ -404,8 +411,8 @@ if __name__ == "__main__":
 
 # python saliency.py  --task maniskill3000classif --data_path "/storage1/fs1/sibai/Active/ihab/research_new/datasets_dino" --backbone r3m  --occlusion_method blur  --blur_sigma 11   --num_samples 20 --output_dir /storage1/fs1/sibai/Active/ihab/research_new/dino_wm/scratch_ihab_files/saliency --seed 3
 
-# python saliency.py  --task dubins1800_withcost --data_path "/storage1/fs1/sibai/Active/ihab/research_new/datasets_dino" --backbone r3m  --occlusion_method blur  --blur_sigma 11   --num_samples 20 --output_dir /storage1/fs1/sibai/Active/ihab/research_new/dino_wm/scratch_ihab_files/saliency --seed 3
-# python saliency.py  --task dubins1800_withcost --data_path "/storage1/fs1/sibai/Active/ihab/research_new/datasets_dino" --backbone dino  --occlusion_method black  --blur_sigma 11   --num_samples 20 --output_dir /storage1/fs1/sibai/Active/ihab/research_new/dino_wm/scratch_ihab_files/saliency --seed 3 --patch_size 20 --stride 10
+# python saliency.py  --task dubins1800_continuous_cost --data_path "/storage1/fs1/sibai/Active/ihab/research_new/datasets_dino" --backbone r3m  --occlusion_method blur  --blur_sigma 11   --num_samples 20 --output_dir /storage1/fs1/sibai/Active/ihab/research_new/dino_wm/scratch_ihab_files/saliency --seed 3 --patch_size 20 --stride 10
+# python saliency.py  --task dubins1800_continuous_cost --data_path "/storage1/fs1/sibai/Active/ihab/research_new/datasets_dino" --backbone dino  --occlusion_method black  --blur_sigma 11   --num_samples 20 --output_dir /storage1/fs1/sibai/Active/ihab/research_new/dino_wm/scratch_ihab_files/saliency --seed 3 --patch_size 20 --stride 10
 
 #fix     ckpt_dir = Path(f"/storage1/fs1/sibai/Active/ihab/research_new/checkpt_dino/outputs1/dubins/{args.backbone}")
 #fix     cls_path = ckpt_dir / cls_sub / f"maniskillnew_{args.backbone}" / "failure_classifier.pth"
